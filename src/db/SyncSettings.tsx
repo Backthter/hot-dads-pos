@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
-import { syncConnect, syncNow, hasUnsentChanges, syncDisconnect, isConnected, diagnoseStorage, type DiagReport } from "./sync-client";
-import { ChevronDown, Save, Trash2, Plus, X, BookmarkCheck, Database, CloudOff, Bug } from "lucide-react";
+import { syncConnect, syncNow, hasUnsentChanges, syncDisconnect, isConnected, resendEverything, diagnoseStorage, type DiagReport } from "./sync-client";
+import { ChevronDown, Save, Trash2, Plus, X, BookmarkCheck, Database, CloudOff, Bug, UploadCloud } from "lucide-react";
 
 type SyncStatus = "disconnected" | "connecting" | "connected" | "error";
 
@@ -43,6 +43,9 @@ export function SyncSettings() {
   const [pendingChanges, setPendingChanges] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  /** Armed but not yet confirmed. A backfill is deliberate or it is nothing. */
+  const [confirmingResend, setConfirmingResend] = useState(false);
+  const [resending, setResending] = useState(false);
   const presetsInitialized = useRef(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -185,6 +188,32 @@ export function SyncSettings() {
     }
   };
 
+  /**
+   * Uploads the whole database rather than what has changed.
+   *
+   * The stock ledger, the daily snapshots and the oversell log only started
+   * replicating in Phase 0. Everything recorded before that is on this device
+   * and nowhere else, and because those three tables merge by union rather than
+   * being replaced, nothing will ever push them on its own. Without one
+   * backfill a second till holds movements from today forward and nothing
+   * before — which is worse than an empty ledger, because the figures it
+   * produces look plausible.
+   */
+  const handleResendEverything = async () => {
+    if (resending) return;
+    setConfirmingResend(false);
+    setResending(true);
+    try {
+      const result = await resendEverything();
+      setLastSyncResult(`Resent everything:\n${result}`);
+      setPendingChanges(false);
+    } catch (e: unknown) {
+      setLastSyncResult(String(e));
+    } finally {
+      setResending(false);
+    }
+  };
+
   const handleDisconnect = async () => {
     try {
       await syncDisconnect();
@@ -194,6 +223,7 @@ export function SyncSettings() {
     setStatus("disconnected");
     setLastSyncResult(null);
     setPendingChanges(false);
+    setConfirmingResend(false);
   };
 
   const statusColor =
@@ -401,6 +431,57 @@ export function SyncSettings() {
               </>
             )}
           </button>
+
+          {/*
+            Resend everything.
+
+            Not automatic, and not folded into Sync Now. Sync Now is the
+            everyday action; this one re-uploads the entire history, which over
+            a market's phone connection is a decision somebody should make on
+            purpose. It is armed first and states what it is for, because the
+            reason to press it — a device that has been syncing for months and
+            still holds no stock ledger in the cloud — is not something the
+            button's name can convey on its own.
+          */}
+          {confirmingResend ? (
+            <div className="bg-[var(--app-bg-tertiary)] rounded-lg p-3 border border-[#FE9A00]/40 space-y-2.5">
+              <p className="text-[11px] text-[var(--app-text-secondary)] leading-relaxed">
+                This uploads every row this till holds, not just what has changed.
+                Use it once after an update that adds tables to sync — the stock
+                ledger, the daily snapshots and the oversell log only started
+                replicating recently, so anything recorded before that is on this
+                device and nowhere else.
+              </p>
+              <p className="text-[11px] text-zinc-500 leading-relaxed">
+                Nothing is deleted either end. It can take a while on a slow
+                connection.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setConfirmingResend(false)}
+                  className="flex-1 text-zinc-400 hover:text-[var(--app-text)] text-xs py-2 rounded-lg border border-[#52525b] transition-colors"
+                >
+                  Not now
+                </button>
+                <button
+                  onClick={handleResendEverything}
+                  className="flex-1 bg-[#FE9A00] text-black text-xs font-semibold py-2 rounded-lg hover:bg-[#E58A00] transition-colors"
+                >
+                  Resend everything
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmingResend(true)}
+              disabled={resending || syncing}
+              className="w-full text-zinc-400 hover:text-[var(--app-text)] text-xs transition-colors py-2 rounded-lg border border-[#52525b] flex items-center justify-center gap-1.5 disabled:opacity-40"
+            >
+              <UploadCloud size={12} />
+              {resending ? "Resending everything..." : "Resend everything"}
+            </button>
+          )}
+
           <button
             onClick={handleDisconnect}
             className="w-full text-zinc-400 hover:text-[#F9624E] text-xs transition-colors py-1 flex items-center justify-center gap-1"

@@ -19,6 +19,28 @@ export async function checkChanges(): Promise<string> {
   return invoke<string>("sync_check_changes");
 }
 
+/**
+ * Uploads every row of every synced table, not just what has changed.
+ *
+ * This is the same command as `sendChanges` — the Rust side has only ever done
+ * a full upload — but it is exported under its own name because it is offered
+ * to the user as a deliberate act with a different meaning. `sendChanges` is
+ * the background timer keeping the cloud current; this is a person deciding to
+ * backfill a device.
+ *
+ * It exists because the stock ledger, the daily snapshots and the oversell log
+ * were absent from `SYNC_TABLES` until this phase. A device that has been
+ * syncing all along holds none of that history in the cloud, and the
+ * append-only strategy means nothing will ever push it there on its own: those
+ * tables are merged by union, and rows nobody sends are rows nobody gets. One
+ * explicit backfill closes the gap. Doing it automatically would mean every
+ * till re-uploading its entire history on the next launch after an update,
+ * over a market's phone connection.
+ */
+export async function resendEverything(): Promise<string> {
+  return invoke<string>("sync_send_changes");
+}
+
 export async function getSyncVersion(): Promise<string> {
   return invoke<string>("sync_get_version");
 }
