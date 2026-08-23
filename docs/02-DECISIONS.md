@@ -432,3 +432,170 @@ and the migration notice is what explains it at the moment it happens.
 Nothing may total amounts across bases. Code that adds Rs 4 a ticket to 18% of
 sales produces a plausible number that is not money, and the shape of
 `CostSummary` is deliberately awkward to misuse in that direction.
+
+---
+
+## ADR-013 — Event costs are not allocated across a session's figures
+
+**Status:** accepted · 2026-08
+
+**Context:** A cost carries a session id or an event id, never both (ADR-012).
+`resolveScope` picks up both for a session scope: the costs of that session, plus
+anything attached to the event containing it — which is correct, because
+otherwise an event-level cost is invisible from every screen a person actually
+looks at. The question this leaves is what break-even should then *do* with the
+event's rupees when the scope is one session out of three.
+
+The obvious answer is to apportion: give each session a share of the pitch fee
+in proportion to what it took. It is the answer accountancy would give, and it
+is wrong here for a reason specific to this figure. Saturday's break-even would
+be computed from a denominator that includes Sunday's revenue — so Saturday's
+target would *change on Monday*, downwards, because Sunday traded well. That is
+the same defect ADR-012 was written to remove, arriving through a different
+door: a target that depends on facts that did not exist when the day it
+describes was traded.
+
+Splitting evenly across sessions is no better. It is stable, but it is a fact
+about how many days the market ran rather than about what any of them cost, and
+the first thing it does is make a rained-off Sunday look like it owed a third of
+a pitch fee it had nothing to do with.
+
+**Decision:** From a session scope, `breakEven` covers the session's own costs
+only. `per-event` rupees in scope are reported separately, on
+`BreakEven.heldEventCosts`, and the panel states plainly that the event carries
+Rs X on top of this, with a control that switches the scope to the event. From
+an event or date scope they are simply part of the committed rupees, because
+there the period genuinely does owe them.
+
+The mechanism is one parameter, `CostScope`, and the only thing it changes is
+where the `per-event` total goes. It is a parameter rather than a flag read off
+`ResolvedScope` because `sessionScoped` is already true for both a session and
+an event scope — it means "membership rather than timestamps", which is a
+different question.
+
+**Rejected:** *Apportioning by revenue share*, for the reason above — it makes a
+past target move. *Splitting evenly across the event's sessions*, which is
+stable but describes the calendar rather than the business. *Excluding
+event-level costs from the session screen altogether*, which is the tidiest code
+and the worst outcome: the shop is then never told that Rs 3,000 is outstanding
+against a market it is in the middle of trading, which is exactly when knowing
+would change something.
+
+**Consequences:** A session's break-even is a property of that session and
+nothing else, and does not move afterwards. The figure is deliberately
+incomplete for an event that has costs of its own, so it is never shown without
+saying what it excludes and offering the scope where the answer is whole.
+Anything else that resolves costs to money for a period has to take the same
+parameter, or the screens will disagree about the same market.
+
+---
+
+## ADR-014 — A purchase is a receipt
+
+**Status:** accepted · 2026-08
+
+**Context:** Two functions counted purchases and did not agree.
+`stockPurchasesValue` counted movements with reason `added` and `packet`.
+`foodCost` kept a purchase loop of its own and counted `added`, `packet` **and**
+`correction`. Both figures are shown on the Overview tab — one as "Stock
+purchases", one inside the actual food cost calculation — so the same delivery
+was two different numbers on the same screen, with nothing to say which was
+which. A shop that tried to reconcile them had no way to find out.
+
+**Decision:** One definition, in one place. `stockPurchasesValue` decides what a
+purchase is and `foodCost` calls it. A purchase is a **receipt**: `added` and
+`packet`. A `correction` is not a purchase — it carries no cost data and means
+"the shelf disagreed with the book", which is a measurement of stock that was
+already there rather than money leaving the till.
+
+**Rejected:** *Counting `correction` in both.* A correction has no `unitCost` or
+`totalCost`, so it can only be valued at today's cost per unit — an outlay that
+never happened, invented from a number that describes a different question. It
+also fails in one direction: it inflates purchases, which inflates actual food
+cost, so a shop looks worse at controlling cost the more carefully it counts its
+stock. Also rejected: *keeping the two definitions and labelling them
+differently on screen.* The two names would have had to explain a distinction
+that has no basis in the domain, and the reconciliation the shop was attempting
+is a legitimate thing to attempt.
+
+**Consequences:** `foodCost.purchases` and `stockPurchasesValue` agree by
+construction over the same window, and `metrics.check.ts` asserts it over a
+ledger that contains a correction. Actual food cost falls for any shop that had
+positive corrections in the period — which is the previous figure's error
+becoming visible, in the same shape as ADR-012's.
+
+This exposes something adjacent that is **not** fixed here. Reversals are
+written two ways: `undoMovement` appends its compensating line and marks both
+rows `reversed`, while `reverseStockChanges` posts a plain negative `correction`
+and marks nothing. Both purchase figures skip `reversed` rows, so a delivery
+undone through the second path leaves its original `added` line still counted as
+a purchase while the correction that cancels it counts as nothing. That is a
+`reversed`-flag problem rather than a which-reasons-count problem, and belongs
+with Phase 1B's `'reversal'` reason and `effectiveMovements`.
+
+---
+
+## ADR-015 — The menu carries no cost override
+
+**Status:** accepted · 2026-08 · supersedes nothing; removes a feature that
+never worked
+
+**Context:** `MenuItem.unitCostOverride` was a hand-typed ingredient cost that
+won outright over the recipe in `unitCostFor`. It was edited from a field beside
+the price on every menu row, and it had **no column**: `menu_items` does not
+declare `unit_cost_override` and `persistence.ts` neither selected nor wrote it.
+Every override ever typed worked until the app was restarted and then vanished,
+with the item quietly reverting to its recipe cost. Phase 0 found it; Phase 1A-i
+left it as 1A-ii's.
+
+So the choice was between adding the column and removing the feature, and the
+bug is the smaller half of the question. The field was in the wrong place. An
+override at the *dish* asserts a cost for one menu item; if a bought-in
+component's price is wrong, every dish containing it is wrong the same way, and
+the override fixes them one at a time and silently goes stale on all of them.
+And a cost box sitting beside a price box on a menu screen invites the thought
+that the price should follow the cost, which is not how a burger at a market is
+priced.
+
+**Decision:** Removed from the menu. The field on the row becomes a read-only
+resolved cost — *"Rs 84 to make · 61% margin"*, or *"Rs 84 to make · no cost for
+Buns"* when the recipe is incomplete — that taps through to Assign Stock for
+that item. Overriding an ingredient cost happens at the ingredient:
+`StockItem.costPerUnit` is editable in the Stock Editor and already carries the
+"typed in by hand, or set by a receipt" model, with receipts winning. The
+ready-made case the field existed for — a bottled drink, a packet of crisps — is
+a `pcs` stock item with a cost per unit, assigned like any other ingredient; a
+deal picks it up through its components.
+
+**The field stays on the type**, marked deprecated, and `unitCostFor` goes on
+reading it. Gate features, never parsers: an in-memory object or a legacy row
+that still carries one must go on meaning what it says, and the read costs
+nothing. It cannot arrive from disk, because it never had a column to arrive
+from.
+
+**No migration is written, and that is not an oversight.** There are no
+overrides to migrate: the field was never persisted, so nothing on disk carries
+one. Sales rung up while an override was live in memory carry a frozen
+`CartItem.unitCost` that reflects it, and those stay exactly as they are —
+invariant 3, and the reason a migration that "corrected" them would be the worse
+answer.
+
+**Rejected:** *Adding the column.* It is three lines and it would have made the
+feature work, which is the problem — it would have made a costing model
+permanent that puts the correction at the wrong level and quietly overrides
+every future recipe change on that item. Also rejected: *keeping the field
+editable but showing the resolved cost beside it*, which is two numbers claiming
+to be the same thing and no indication of which one any figure used.
+
+**Consequences:** Ingredient cost has one home, and correcting it there fixes
+every item that uses it. The menu screen stops implying cost-plus pricing.
+Margins on the menu row are read-outs, so a shop can see immediately which items
+are not costed and go and fix them, which the writable field actively hid — a
+typed override made an uncosted item look costed.
+
+An item with an incomplete recipe shows what is missing rather than a figure
+that leaves it out (invariant 2). Anything that genuinely cannot be expressed as
+a recipe now needs a stock item to stand for it; that is one more row on the
+shelf and it is the row that makes the cost visible to `foodCost`,
+`stockPurchasesValue` and the reorder list, none of which an override was ever
+part of.
