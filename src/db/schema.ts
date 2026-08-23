@@ -87,10 +87,38 @@ export const tradingSessions = sqliteTable("trading_sessions", {
 export const costEntries = sqliteTable("cost_entries", {
   id: text("id").primaryKey(),
   sessionId: text("session_id"),
+  /**
+   * An event this cost belongs to as a whole — one pitch fee for a three-day
+   * market. A row carries a session id or an event id, never both.
+   *
+   * Added in Phase 1A. The field existed on `CostEntry` from the beginning and
+   * had no column, so event-level costs worked in memory and vanished on
+   * reload, reappearing as costs belonging to nothing.
+   */
+  eventId: text("event_id"),
+  /** Rupees, except when basis is 'per-revenue', where it is percentage points. */
   amount: real("amount").notNull().default(0),
   note: text("note").notNull().default(""),
-  /** 'fixed' | 'variable'. Break-even divides by contribution margin, so this matters. */
+  /**
+   * @deprecated Superseded by `basis` in Phase 1A — see ADR-012 and
+   * `docs/phases/PHASE-1A-MONEY-MODEL.md`.
+   *
+   * Retained, not dropped. Historical rows carry it, and it is the only record
+   * of how they were filed under the old fixed/variable model; dropping the
+   * column would make that interpretation unrecoverable, and keeping it costs
+   * nothing. Nothing writes a value here any more: rows written since the
+   * migration carry an empty string, which is how a new row is told apart from
+   * one that predates it.
+   */
   kind: text("kind").notNull().default("fixed"),
+  /**
+   * What the amount is charged per: 'per-session' | 'per-event' | 'per-order' |
+   * 'per-unit' | 'per-revenue'. Defaults to 'per-session', which is also what
+   * every pre-migration row becomes — including the ones filed as 'variable',
+   * because inferring a basis from a cost's name would invent information and
+   * change a historical figure.
+   */
+  basis: text("basis").notNull().default("per-session"),
   timestamp: integer("timestamp").notNull(),
 });
 

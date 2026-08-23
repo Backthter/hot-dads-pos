@@ -167,9 +167,11 @@ fn run_migrations(db_path: &PathBuf) {
         CREATE TABLE IF NOT EXISTS cost_entries (
             id TEXT PRIMARY KEY,
             session_id TEXT,
+            event_id TEXT,
             amount REAL NOT NULL DEFAULT 0,
             note TEXT NOT NULL DEFAULT '',
             kind TEXT NOT NULL DEFAULT 'fixed',
+            basis TEXT NOT NULL DEFAULT 'per-session',
             timestamp INTEGER NOT NULL
         );"
     )
@@ -220,6 +222,23 @@ fn run_migrations(db_path: &PathBuf) {
     add_column_if_missing(&conn, "orders", "session_id", "TEXT");
     add_column_if_missing(&conn, "orders", "session_ticket", "INTEGER");
 
+    // Costs carry a basis — what the amount is charged per — rather than a
+    // fixed/variable kind, and an event id for the costs that belong to a whole
+    // market rather than to one of its days (ADR-012).
+    //
+    // `kind` is deliberately left in place. Historical rows carry it and it is
+    // the only record of how they were filed before this; dropping it would
+    // make the old interpretation unrecoverable. Existing rows take the
+    // 'per-session' default, including those filed as 'variable' — the app
+    // offers those for re-filing rather than guessing a basis from their names.
+    add_column_if_missing(&conn, "cost_entries", "event_id", "TEXT");
+    add_column_if_missing(
+        &conn,
+        "cost_entries",
+        "basis",
+        "TEXT NOT NULL DEFAULT 'per-session'",
+    );
+
     add_column_if_missing(&conn, "parked_sessions", "discount_kind", "TEXT");
     add_column_if_missing(&conn, "parked_sessions", "discount_value", "REAL");
     add_column_if_missing(&conn, "parked_sessions", "editing_order_id", "TEXT");
@@ -235,6 +254,7 @@ fn run_migrations(db_path: &PathBuf) {
          CREATE INDEX IF NOT EXISTS idx_orders_session ON orders (session_id);
          CREATE INDEX IF NOT EXISTS idx_sessions_event ON trading_sessions (event_id);
          CREATE INDEX IF NOT EXISTS idx_costs_session ON cost_entries (session_id);
+         CREATE INDEX IF NOT EXISTS idx_costs_event ON cost_entries (event_id);
          CREATE INDEX IF NOT EXISTS idx_costs_time ON cost_entries (timestamp);",
     );
 

@@ -1,4 +1,5 @@
 import { getDb } from './database';
+import { COST_ENTRY_COLUMNS, costEntryFromRow, costEntryToRow } from './costEntryRows';
 import type {
   MenuItem, Category, Order, CartItem, ParkedSession, StockItem, MenuItemStockAssignment,
   DealItem, Discount, StockMovement, InventorySnapshot, OversellEvent,
@@ -264,16 +265,9 @@ export async function loadAllData(): Promise<PersistedData | null> {
     }));
 
     const costRows = await db.select<Record<string, unknown>[]>(
-      'SELECT id, session_id, amount, note, kind, timestamp FROM cost_entries ORDER BY timestamp'
+      `SELECT ${COST_ENTRY_COLUMNS.join(', ')} FROM cost_entries ORDER BY timestamp`
     );
-    const costEntries: CostEntry[] = costRows.map(r => ({
-      id: String(r.id ?? ''),
-      sessionId: r.session_id ? String(r.session_id) : undefined,
-      amount: Number(r.amount ?? 0),
-      note: String(r.note ?? ''),
-      kind: r.kind === 'variable' ? 'variable' : 'fixed',
-      timestamp: Number(r.timestamp ?? 0),
-    }));
+    const costEntries: CostEntry[] = costRows.map(costEntryFromRow);
 
     const stateRows = await db.select<Record<string, unknown>[]>("SELECT value FROM app_state WHERE key = 'order_counter'");
     const orderCounter = stateRows.length > 0 ? Number((stateRows[0] as Record<string, unknown>).value ?? 1) : 1;
@@ -521,10 +515,16 @@ async function runSave(data: PersistedData): Promise<void> {
         await db.execute('DELETE FROM cost_entries WHERE id = ?', [id]);
       }
     }
+    // `event_id` and `basis` are written here alongside the rest — the columns
+    // and the mapping are in `costEntryRows.ts`, so the read and the write can
+    // only disagree by being edited apart. `kind` is carried through rather
+    // than restated: it is deprecated, nothing sets it any more, and it is
+    // written back only so `INSERT OR REPLACE` cannot reset it to its default.
+    const costPlaceholders = COST_ENTRY_COLUMNS.map(() => '?').join(', ');
     for (const c of data.costEntries ?? []) {
       await db.execute(
-        'INSERT OR REPLACE INTO cost_entries (id, session_id, amount, note, kind, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
-        [c.id, c.sessionId ?? null, c.amount, c.note, c.kind, c.timestamp]
+        `INSERT OR REPLACE INTO cost_entries (${COST_ENTRY_COLUMNS.join(', ')}) VALUES (${costPlaceholders})`,
+        costEntryToRow(c)
       );
     }
 

@@ -192,17 +192,42 @@ export interface TradingSession {
   notes?: string;
 }
 
+/**
+ * @deprecated Superseded by `CostBasis` in Phase 1A (ADR-012).
+ *
+ * Kept because rows written before that phase carry it, and it is the only
+ * record of how a cost was filed under the old model. Nothing new is filed as
+ * a kind; the migration reads it once to offer those rows for re-filing.
+ */
 export type CostKind = 'fixed' | 'variable';
+
+/**
+ * How a cost scales — what it is charged *per*.
+ *
+ * The old model had two answers, fixed and variable, and neither said what a
+ * variable cost varied with. Break-even then divided a typed rupee total by
+ * revenue-so-far and treated the result as a rate, so the target moved as sales
+ * came in: log Rs 200 of boxes in the morning and the day's break-even was one
+ * number at ten o'clock and another at four, on identical facts. A basis says
+ * what the amount is charged per, and that is what makes it resolvable to money
+ * for a period rather than guessed from whatever has sold so far. See ADR-012.
+ */
+export type CostBasis =
+  | 'per-session'   // paid once per service: pitch fee, a staff shift
+  | 'per-event'     // paid once for the whole event: a three-day market pitch
+  | 'per-order'     // scales with tickets: bags, receipt roll, cutlery
+  | 'per-unit'      // scales with items sold
+  | 'per-revenue';  // a true percentage: delivery commission, card fees
 
 /**
  * A cost the POS cannot observe: stall fee, staff, fuel, packaging.
  *
  * Ingredient cost comes from the stock ledger and needs no typing. Everything
- * else has to be logged by hand, so this is deliberately a two-field form.
+ * else has to be logged by hand, so this is deliberately a short form.
  *
- * The fixed/variable split is not bookkeeping pedantry — break-even revenue is
- * fixed costs ÷ contribution margin, and filing a per-unit cost as fixed
- * inflates both sides of that division silently.
+ * The basis is not bookkeeping pedantry — break-even revenue is committed costs
+ * ÷ contribution margin, and filing a per-ticket cost as a flat one inflates
+ * both sides of that division silently.
  */
 export interface CostEntry {
   id: string;
@@ -218,10 +243,44 @@ export interface CostEntry {
    * afternoon. A cost carries a session id or an event id, never both.
    */
   eventId?: string;
-  /** Rupees. Always positive — this is a cost, the sign is implied. */
+  /**
+   * Always positive — this is a cost, the sign is implied.
+   *
+   * **The unit depends on `basis`, and this is the only field in the app whose
+   * meaning does.** Rupees for `per-session`, `per-event`, `per-order` and
+   * `per-unit`; percentage points for `per-revenue`.
+   *
+   * It is not two fields because the four rupee bases would then need a rate
+   * column that is null on all of them, and the one percentage basis a rupee
+   * column that is null on it — a shape where every row has a hole in it, and
+   * where "no amount recorded" and "an amount of zero" stop being tellable
+   * apart for whichever column happens to be the empty one. Invariant 2 is
+   * about exactly that distinction, so the field stays single and the basis
+   * says how to read it. Nothing may total these amounts across bases: Rs 4 a
+   * ticket and 18% of sales are not addable, and code that adds them produces a
+   * plausible number that is not money.
+   */
   amount: number;
   note: string;
-  kind: CostKind;
+  /**
+   * What the amount is charged per. Required — an amount with no basis cannot
+   * be resolved to money for a period.
+   *
+   * `per-event` requires `eventId` to be set: the amount is paid once for the
+   * whole event, so a per-event cost with no event is an amount attached to
+   * nothing. That is asserted at the write sites rather than assumed, in
+   * `assertCostEntry` (`src/app/lib/sessions.ts`).
+   */
+  basis: CostBasis;
+  /**
+   * @deprecated The pre-Phase-1A fixed/variable model (ADR-012).
+   *
+   * Present only on rows written before the migration. Never set on a new
+   * entry, never read by any figure: it survives so the migration can show a
+   * shop what a row used to say while asking where it really belongs, and so
+   * that the pre-migration interpretation of historical rows stays recoverable.
+   */
+  kind?: CostKind;
   timestamp: number;
 }
 
