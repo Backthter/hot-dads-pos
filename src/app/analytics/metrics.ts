@@ -1,4 +1,4 @@
-import { resolveDealComponent } from '../lib/inventory';
+import { resolveDealComponent, unitCostFor } from '../lib/inventory';
 import { sessionTradingHours } from '../lib/sessions';
 import type {
   CartItem, CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
@@ -527,19 +527,158 @@ function mean(values: number[]): number | null {
  * that matters is different for every item, and the cheap one is a much longer
  * day than the expensive one.
  */
+/** One side of an item's margin: a price, what one costs, and what is left. */
+export interface ItemMarginSide {
+  /** What one is sold at. */
+  price: number;
+  /** Ingredient cost of one. */
+  unitCost: number;
+  /** Price less ingredients, before the costs that are not ingredients. */
+  grossPerUnit: number;
+  /** `grossPerUnit` ÷ price, as a percentage. */
+  marginPct: number;
+  /** What one leaves behind after every cost that scales with a sale. */
+  contributionPerUnit: number;
+}
+
+/** How much margin ten percent is, for the divergence indicator. */
+const DIVERGENCE_THRESHOLD_PCT = 10;
+
+export interface ItemMargin {
+  menuItemId: string;
+  name: string;
+  /**
+   * The menu's current price against a live recipe lookup. Responds to a price
+   * change or a supplier price the moment either is edited.
+   *
+   * Null when the recipe is incomplete — a margin taken from a partial cost is
+   * the flattering answer produced automatically on the data nobody can check,
+   * which is what invariant 2 exists to prevent.
+   */
+  today: ItemMarginSide | null;
+  /** The ingredients with no cost on file, which is why `today` is null. */
+  missing: string[];
+  /**
+   * What actually sold, at the costs frozen onto those lines at checkout.
+   *
+   * This must not move when a price changes (invariant 3): it is a fact about
+   * past transactions, and re-pricing it at today's menu would rewrite last
+   * month's profit every time somebody edited a recipe.
+   */
+  realised: ItemMarginSide | null;
+  /** How many sold in this period. */
+  sold: number;
+  /** |today − realised| ÷ realised on gross margin, as a percentage. */
+  divergencePct: number | null;
+  /** True when the two are more than 10% apart. */
+  diverged: boolean;
+}
+
+/**
+ * Two margins per item, deliberately kept apart.
+ *
+ * They used to be one figure, and the way it was derived made it useless for
+ * either job: price came out as `item.netRevenue / item.units`, the realised
+ * historical average. That figure cannot respond to a price change by
+ * construction — put the burger up by Rs 20 and it says exactly what it said
+ * before — and after a handful of sales at the new price it reports a blend
+ * that is neither the old price nor the new one, so it is not a good historical
+ * record either.
+ *
+ * So: **margin today** is the menu's price against a live `unitCostFor`, and
+ * answers "what does this earn me now". **Realised margin** is what actually
+ * sold at the costs frozen onto those lines, and answers "what did this earn
+ * me". The first moves when the menu is edited; the second must never.
+ *
+ * When they diverge by more than 10% something is worth looking at — usually a
+ * price that has moved, or a supplier cost that has, and neither is visible
+ * from either figure alone.
+ */
+export function itemMargins(
+  items: ItemPerformance[],
+  menuItems: MenuItem[],
+  assignments: MenuItemStockAssignment[],
+  stockItems: StockItem[],
+  costs: CostSummary,
+  totals: Totals,
+  scope: CostScope = 'range',
+): ItemMargin[] {
+  const resolved = resolveCosts(costs, totals, scope);
+  // A per-ticket cost becomes a per-unit one through the basket, exactly as in
+  // `breakEven`. Both sides carry it, so it cannot create a divergence.
+  const perOrderPerUnit = resolved.averageBasket && resolved.averageBasket > 0
+    ? resolved.perOrderCost / resolved.averageBasket
+    : 0;
+
+  const side = (price: number, unitCost: number): ItemMarginSide => {
+    const grossPerUnit = price - unitCost;
+    return {
+      price,
+      unitCost,
+      grossPerUnit,
+      marginPct: price > 0 ? (grossPerUnit / price) * 100 : 0,
+      contributionPerUnit: grossPerUnit
+        - price * resolved.revenueRate - resolved.perUnitCost - perOrderPerUnit,
+    };
+  };
+
+  return items.map(item => {
+    const menuItem = menuItems.find(m => m.id === item.menuItemId);
+    const live = menuItem
+      ? unitCostFor(menuItem, menuItems, assignments, stockItems)
+      : null;
+
+    const today = menuItem && live?.complete && menuItem.price > 0
+      ? side(menuItem.price, live.cost)
+      : null;
+
+    const realised = item.costed && item.units > 0 && item.netRevenue > 0
+      ? side(item.netRevenue / item.units, item.cogs / item.units)
+      : null;
+
+    const divergencePct = today && realised && realised.grossPerUnit !== 0
+      ? Math.abs(today.grossPerUnit - realised.grossPerUnit) / Math.abs(realised.grossPerUnit) * 100
+      : null;
+
+    return {
+      menuItemId: item.menuItemId,
+      name: item.name,
+      today,
+      missing: live?.missing ?? [],
+      realised,
+      sold: item.units,
+      divergencePct,
+      diverged: divergencePct !== null && divergencePct > DIVERGENCE_THRESHOLD_PCT,
+    };
+  });
+}
+
 export interface ItemBreakEven {
   menuItemId: string;
   name: string;
-  /** What one of these leaves behind after ingredients and per-sale costs. */
+  /**
+   * What one of these leaves behind after ingredients and per-sale costs, at
+   * **today's** price and today's recipe — because a target is about what to do
+   * next, and a target computed from last month's prices is not actionable.
+   */
   contributionPerUnit: number;
   /** How many you would have to sell, on their own, to cover the fixed costs. */
   units: number;
   /** How many have sold in this period already. */
   sold: number;
+  /** The two margins behind the figure, so the screen can show the divergence. */
+  margin: ItemMargin;
 }
 
+/**
+ * How many of one thing covers the day, from the margin it earns *today*.
+ *
+ * Items whose recipe is incomplete are absent rather than estimated: there is
+ * no honest number to put on the tile, and a wrong one here is a wrong
+ * instruction to somebody standing at a grill.
+ */
 export function breakEvenByItem(
-  items: ItemPerformance[],
+  margins: ItemMargin[],
   costs: CostSummary,
   totals: Totals,
   scope: CostScope = 'range',
@@ -547,27 +686,17 @@ export function breakEvenByItem(
   const resolved = resolveCosts(costs, totals, scope);
   if (resolved.fixed <= 0) return [];
 
-  // Each rate is charged against the volume its own basis names, exactly as in
-  // `breakEven`. A per-ticket cost becomes a per-unit one through the basket.
-  const perOrderPerUnit = resolved.averageBasket && resolved.averageBasket > 0
-    ? resolved.perOrderCost / resolved.averageBasket
-    : 0;
-
-  return items
-    .filter(item => item.costed && item.units > 0)
-    .map(item => {
-      const price = item.netRevenue / item.units;
-      const contributionPerUnit = (item.netRevenue - item.cogs) / item.units
-        - price * resolved.revenueRate - resolved.perUnitCost - perOrderPerUnit;
-      return {
-        menuItemId: item.menuItemId,
-        name: item.name,
-        contributionPerUnit,
-        units: contributionPerUnit > 0 ? resolved.fixed / contributionPerUnit : Infinity,
-        sold: item.units,
-      };
-    })
-    .filter(row => Number.isFinite(row.units) && row.contributionPerUnit > 0)
+  return margins
+    .filter(margin => margin.today !== null && margin.today.contributionPerUnit > 0)
+    .map(margin => ({
+      menuItemId: margin.menuItemId,
+      name: margin.name,
+      contributionPerUnit: margin.today!.contributionPerUnit,
+      units: resolved.fixed / margin.today!.contributionPerUnit,
+      sold: margin.sold,
+      margin,
+    }))
+    .filter(row => Number.isFinite(row.units))
     // Best earner first: the shortest route to covering the day.
     .sort((a, b) => a.units - b.units);
 }

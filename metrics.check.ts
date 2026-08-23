@@ -6,8 +6,9 @@
  * something to fail against. Run with `npx tsx metrics.check.ts`.
  */
 import {
-  BREAK_EVEN_BLOCKED, attachmentPairs, breakEven, costSummary, deadStock, foodCost,
-  inventoryTurnover, queueBands, resolveRange, stockoutStats, totalsFor, voidStats,
+  BREAK_EVEN_BLOCKED, attachmentPairs, breakEven, breakEvenByItem, costSummary, deadStock,
+  foodCost, inventoryTurnover, itemMargins, itemPerformance, queueBands, resolveRange,
+  stockoutStats, totalsFor, voidStats,
 } from './src/app/analytics/metrics';
 import {
   costEntryIsCoherent, costsForEvent, endSession, needsRefiling, pauseSession, resumeSession,
@@ -22,7 +23,8 @@ import {
 } from './src/app/analytics/search';
 import type { CostSummary } from './src/app/analytics/metrics';
 import type {
-  CostBasis, CostEntry, InventorySnapshot, Order, OversellEvent, StockItem, StockMovement,
+  CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
+  OversellEvent, StockItem, StockMovement,
 } from './src/app/types';
 
 let failures = 0;
@@ -165,6 +167,64 @@ const ticketless = breakEven(
   { ...beTotals, orders: 0 }, costsOf({ 'per-session': 1000, 'per-order': 20 }));
 check('no tickets to spread a per-ticket cost', ticketless.blocked, BREAK_EVEN_BLOCKED.noBasket);
 check('and the basket is unknown, not zero', ticketless.averageBasket, null);
+
+/* ------------------------------------------- margin today vs realised margin */
+// One burger, Rs 100 on the menu, made of Rs 30 of beef and Rs 10 of bun. The
+// two tickets above sold ten of them with Rs 40 frozen onto each line.
+//
+// These two figures used to be one, derived as netRevenue ÷ units — the
+// realised historical average, which cannot respond to a price change by
+// construction and reports a blend of the two prices after a few sales at the
+// new one. Each half is checked here for the property the blend could not have.
+console.log('\nMargin today vs realised');
+const burger: MenuItem = {
+  id: 'a', name: 'Burger', price: 100, showInOrderMode: true, category: 'Food',
+};
+const recipe: MenuItemStockAssignment[] = [
+  { menuItemId: 'a', stockItemId: 'st-beef', quantityPerItem: 1 },
+  { menuItemId: 'a', stockItemId: 'st-bun', quantityPerItem: 1 },
+];
+const kitchen = (bunCost: number): StockItem[] => [
+  { id: 'st-beef', name: 'Beef', quantity: 500, unit: 'pcs', lowStockThreshold: 0, costPerUnit: 30 },
+  { id: 'st-bun', name: 'Buns', quantity: 500, unit: 'pcs', lowStockThreshold: 0, costPerUnit: bunCost },
+];
+const perItem = itemPerformance(beOrders, [burger], ALL);
+const marginsAt = (menuItem: MenuItem, bunCost = 10) =>
+  itemMargins(perItem, [menuItem], recipe, kitchen(bunCost), costsOf({ 'per-session': 1000 }), beTotals);
+
+const atOldPrice = marginsAt(burger)[0];
+check('margin today · price', atOldPrice.today?.price, 100);
+check('margin today · cost from the recipe', atOldPrice.today?.unitCost, 40);
+check('margin today · %', atOldPrice.today?.marginPct, 60);
+check('realised margin · price actually got', atOldPrice.realised?.price, 100);
+check('realised margin · cost frozen on the line', atOldPrice.realised?.unitCost, 40);
+check('the two agree', atOldPrice.diverged, false);
+
+// Put the burger up by Rs 50. Margin today moves at once — that is the whole
+// point of it. Realised margin must not: it is a fact about sales that already
+// happened, and re-pricing it would rewrite last month's profit (invariant 3).
+const dearer = marginsAt({ ...burger, price: 150 })[0];
+check('a price rise moves margin today', dearer.today?.marginPct, (110 / 150) * 100);
+check('and does not move realised margin', dearer.realised?.marginPct, 60);
+check('realised price is still what was charged', dearer.realised?.price, 100);
+check('the gap is flagged', dearer.diverged, true);
+check('and quantified', dearer.divergencePct, (Math.abs(110 - 60) / 60) * 100);
+
+// A recipe that is only partly costed produces no margin at all. A cost taken
+// over the ingredients that happen to have one is the flattering answer, on
+// exactly the data nobody can check — invariant 2, in the place it matters.
+const partly = marginsAt(burger, 0)[0];
+check('no margin from a partial cost', partly.today, null);
+check('and it names what is missing', partly.missing, ['Buns']);
+check('while realised margin stands', partly.realised?.marginPct, 60);
+
+// Break-even per item follows today's margin, because a target is about what to
+// do next. Rs 1,000 to cover at Rs 110 a burger is ten burgers, not sixteen.
+const beItems = breakEvenByItem(marginsAt({ ...burger, price: 150 }), costsOf({ 'per-session': 1000 }), beTotals);
+check('break-even by item uses today', beItems[0].contributionPerUnit, 110);
+check('and so it moved with the price', beItems[0].units, 1000 / 110);
+check('an uncosted item is absent, not estimated',
+  breakEvenByItem(marginsAt(burger, 0), costsOf({ 'per-session': 1000 }), beTotals).length, 0);
 
 /* ------------------------------------------------------------ cost basis */
 // Each basis totals on its own and touches no other. The amounts are chosen so

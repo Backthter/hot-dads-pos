@@ -17,14 +17,14 @@ import { ScopePicker } from './ScopePicker';
 import { ExportMenu } from './ExportMenu';
 import { DEFAULT_SCOPE, resolveScope, trendBuckets, type Scope } from './scope';
 import {
+  BREAK_EVEN_BLOCKED,
   attachmentPairs, breakEven, breakEvenByItem, bucketsFor, categoryPerformance, costSummary,
-  dataQuality, stockPurchasesValue,
+  dataQuality, itemMargins, stockPurchasesValue,
   deadStock, eventPerformance, foodCost, grainFor, inventoryTurnover, inventoryValue,
   itemPerformance, popularityTrend, queueBands, sessionPerformance, shrinkageValue,
   stockoutStats, throughput, totalsFor, tradingHours, voidStats,
 } from './metrics';
 import { eventGroups } from '../lib/sessions';
-import { BREAK_EVEN_BLOCKED } from './metrics';
 import type { CostScope, DateRange, ItemBreakEven } from './metrics';
 import type {
   CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
@@ -276,9 +276,20 @@ export function AnalyticsView(props: AnalyticsViewProps) {
 
   const be = useMemo(
     () => breakEven(current, scopedCosts, costScope), [current, scopedCosts, costScope]);
+  /**
+   * Margin today and realised margin, per item.
+   *
+   * Deliberately outside the clock — neither figure depends on the time, and
+   * this walks the recipe for every item in scope (ADR-009). It does depend on
+   * the menu, the recipes and the stock costs, because "margin today" is the
+   * figure that has to respond the moment any of the three is edited.
+   */
+  const margins = useMemo(
+    () => itemMargins(items, menuItems, assignments, stockItems, scopedCosts, current, costScope),
+    [items, menuItems, assignments, stockItems, scopedCosts, current, costScope]);
   const beByItem = useMemo(
-    () => breakEvenByItem(items, scopedCosts, current, costScope),
-    [items, scopedCosts, current, costScope]);
+    () => breakEvenByItem(margins, scopedCosts, current, costScope),
+    [margins, scopedCosts, current, costScope]);
   const voids = useMemo(() => voidStats(scopedOrders), [scopedOrders]);
   const pairs = useMemo(
     () => attachmentPairs(scopedOrders, menuItems, range).slice(0, 8),
@@ -988,8 +999,20 @@ function BreakEvenByItem({
             <span className="flex flex-col">
               <span className="text-[var(--app-text)] text-[17px] font-bold leading-[21px]">{row.name}</span>
               <span className="text-[var(--app-text-muted)] text-[12px]">
-                {money(row.contributionPerUnit)} left over on each
+                {money(row.contributionPerUnit)} left over on each, at today&rsquo;s price
               </span>
+              {/*
+                The two margins side by side, and only when they have parted
+                company. This is the figure the old blended average could never
+                show: a price that has moved, or a supplier cost that has, is
+                invisible from either number on its own.
+              */}
+              {row.margin.diverged && row.margin.realised && row.margin.today && (
+                <span className="text-[11.5px] leading-[16px] mt-[3px]" style={{ color: DANGER }}>
+                  {row.margin.today.marginPct.toFixed(0)}% today against{' '}
+                  {row.margin.realised.marginPct.toFixed(0)}% on what actually sold
+                </span>
+              )}
             </span>
           </motion.div>
         </AnimatePresence>
