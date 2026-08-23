@@ -19,14 +19,26 @@ export interface MenuItem {
   category: string;
   dealItems?: DealItem[]; // For deals category - what the deal comprises of
   /**
-   * An ingredient cost typed in by hand, used instead of the one the recipe
-   * implies.
+   * @deprecated Removed from the menu in Phase 1A (ADR-015). Nothing writes it.
    *
-   * Needed for anything the stock ledger cannot see the whole of — a deal that
-   * includes something bought in ready-made, or an item whose components are
-   * only partly tracked. Undefined means "work it out from the recipe", which
-   * is the normal case and stays the default; zero would mean "this costs
-   * nothing", which is a different claim entirely.
+   * An ingredient cost typed in by hand, used instead of the one the recipe
+   * implies. **It never had a column.** `menu_items` has no
+   * `unit_cost_override` and `persistence.ts` neither selects nor writes it, so
+   * every override that was ever typed worked in memory and was lost on the
+   * next reload — silently, with the item quietly reverting to its recipe cost.
+   *
+   * It is resolved by removing the feature rather than by adding the column. A
+   * menu screen should not invite the thought that price follows cost, and an
+   * override belongs at the ingredient rather than at the dish: `StockItem.
+   * costPerUnit` is editable in the Stock Editor and is what the recipe reads.
+   * The ready-made case the field existed for — a bottled drink, a packet of
+   * crisps — is a `pcs` stock item with a cost per unit, assigned like any
+   * other ingredient.
+   *
+   * The field stays on the type and `unitCostFor` still reads it. Gate
+   * features, never parsers: in-memory rows and any legacy object still
+   * carrying one have to keep parsing, and a `CartItem.unitCost` frozen while
+   * an override was live stays exactly as it is (invariant 3).
    */
   unitCostOverride?: number;
 }

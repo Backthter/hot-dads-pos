@@ -164,6 +164,12 @@ export function unitCostFor(
 ): UnitCost {
   // A hand-entered cost wins outright. It is the only figure a person has
   // asserted directly, and the recipe is an inference by comparison.
+  //
+  // Nothing writes this any more — the field is deprecated and the menu row
+  // that used to set it is gone (ADR-015). The read stays because gating a
+  // feature and breaking a parser are different things: an in-memory or legacy
+  // row that still carries one has to go on meaning what it says. It cannot
+  // arrive from disk, because it never had a column to arrive from.
   if (menuItem.unitCostOverride !== undefined && menuItem.unitCostOverride >= 0) {
     return { cost: menuItem.unitCostOverride, complete: true, missing: [] };
   }

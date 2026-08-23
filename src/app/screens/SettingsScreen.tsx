@@ -1,6 +1,6 @@
 import { ScreenShell } from '../components/ScreenShell';
 import { SettingsView } from '../settings/SettingsView';
-import type { MenuHandle, SettingsHandle } from '../state';
+import type { MenuHandle, SettingsHandle, StockHandle } from '../state';
 import type { WipeScope } from '../components/WipeDataPanel';
 
 /**
@@ -14,6 +14,14 @@ import type { WipeScope } from '../components/WipeDataPanel';
 export interface SettingsScreenProps {
   menu: MenuHandle;
   settings: SettingsHandle;
+  /**
+   * Read only, and only for the cost read-out on each menu row: what one of a
+   * thing costs to make comes from the recipe and the shelf, and neither is
+   * edited from here (ADR-015).
+   */
+  stock: StockHandle;
+  /** Opens Assign Stock on one menu item, from that read-out. */
+  onAssignStock: (menuItemId: string) => void;
   /** How many tickets are on the grill right now, so the capacity field can
    *  refuse to be set below it. */
   grillOnBoard: number;
@@ -22,7 +30,7 @@ export interface SettingsScreenProps {
 }
 
 export function SettingsScreen({
-  menu, settings, grillOnBoard, onWipe, onOtherBoard,
+  menu, settings, stock, grillOnBoard, onWipe, onOtherBoard, onAssignStock,
 }: SettingsScreenProps) {
   return (
 
@@ -37,6 +45,9 @@ export function SettingsScreen({
       onAddMenuItem={menu.actions.addMenuItem}
       onUpdateMenuItem={menu.actions.updateMenuItem}
       onDeleteMenuItem={menu.actions.deleteMenuItem}
+      stockAssignments={menu.state.stockAssignments}
+      stockItems={stock.state.stockItems}
+      onAssignStock={onAssignStock}
       grillCapacity={settings.state.grillCapacityInput}
       onGrillCapacity={value => settings.actions.recordSetting('Changed the grill capacity', settings.state.grillCapacityInput, value, settings.actions.setGrillCapacityInput)}
       grillOnBoard={grillOnBoard}

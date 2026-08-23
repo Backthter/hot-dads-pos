@@ -55,12 +55,20 @@ export interface InventoryViewProps {
   onStockTake: (lines: StockTakeLine[], note: string) => void;
   onPrintReorder?: (lines: string[]) => void;
   onDrainStock: (itemIds: string[], note?: string) => void;
+  /**
+   * A menu item to open Assign Stock on, handed over by whoever navigated here.
+   * Settings' cost read-out is the one caller (ADR-015).
+   */
+  assignTarget?: string | null;
+  /** Called once the target has been honoured, so it is not honoured twice. */
+  onAssignTargetTaken?: () => void;
 }
 
 export function InventoryView({
   stockItems, menuItems, assignments, movements,
   onAdjustStock, onSaveStockItem, onDeleteStockItem, onSetPacket, onSaveAssignments,
   onUndoMovement, onStockTake, onPrintReorder, onDrainStock,
+  assignTarget, onAssignTargetTaken,
 }: InventoryViewProps) {
   const theme = useSection();
   const [tab, setTabRaw] = useStickyState<Tab>('inventory.tab', 'add');
@@ -98,6 +106,21 @@ export function InventoryView({
     });
     return q ? sorted.filter(s => s.name.toLowerCase().includes(q)) : sorted;
   }, [stockItems, search]);
+
+  /**
+   * Arriving from the Settings menu row with an item to assign stock to.
+   *
+   * Only the tab is switched here; which item the editor opens on is
+   * `AssignScreen`'s business, and it is handed the id rather than being told
+   * to look at a shared variable. The target is dropped as soon as it has been
+   * read, so coming back to Inventory later by any other route lands on the
+   * grid like it always did.
+   */
+  useEffect(() => {
+    if (!assignTarget) return;
+    setTabRaw('assign');
+    setScreen({ kind: 'grid' });
+  }, [assignTarget, setTabRaw]);
 
   // The quick-add panel and the reorder sheet are the two things here that do
   // not have a ScreenHeader to register a back step for them.
@@ -177,6 +200,8 @@ export function InventoryView({
                 assignments={assignments}
                 onSave={onSaveAssignments}
                 onDetailChange={setAssignDetail}
+                openOn={assignTarget}
+                onOpened={onAssignTargetTaken}
               />
             </div>
             {!assignDetail && (

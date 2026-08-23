@@ -276,16 +276,27 @@ that is the common starting point — but the sum of the parts is the one price 
 deal is never actually sold at. `componentsTotal` in `src/app/lib/menu.ts`
 computes the offer.
 
-`MenuItem.unitCostOverride` is a hand-typed ingredient cost used instead of the
-one the recipe implies. It exists for anything the stock ledger cannot see the
-whole of — a deal including something bought in ready-made, or an item whose
-components are only partly tracked. `undefined` means "work it out from the
-recipe", which is the normal case; zero would mean "this costs nothing", which
-is a different claim entirely.
+`MenuItem.unitCostOverride` was a hand-typed ingredient cost used instead of the
+one the recipe implies. **It is gone from the menu** (ADR-015). Nothing writes
+it, the field beside the price has been replaced by a read-only *"Rs 84 to make
+· 61% margin"* that comes from the recipe and taps through to Assign Stock, and
+the field itself survives on the type marked deprecated so that in-memory and
+legacy rows still parse — features are gated, parsers are not.
 
-> **Known gap.** `unitCostOverride` has no column in `menu_items` and is neither
-> read nor written by `persistence.ts`. It works in memory and is lost on
-> reload. See the Phase 0 report.
+It never worked. `menu_items` has no `unit_cost_override` column and
+`persistence.ts` neither read nor wrote it, so every override typed in was lost
+on the next reload and the item quietly reverted to its recipe cost. There is
+nothing to migrate for the same reason: no override has ever been on disk. Sales
+rung up while one was live in memory carry a frozen `CartItem.unitCost`
+reflecting it, and those stay exactly as they are (invariant 3).
+
+**Where an override belongs now.** At the ingredient, not at the dish:
+`StockItem.costPerUnit` is editable in the Stock Editor, and correcting it there
+fixes every menu item that uses it at once rather than one dish at a time. The
+case the field existed for — something bought in ready-made, a bottled drink, a
+packet of crisps — is a `pcs` stock item with a cost per unit, assigned to the
+menu item like any other ingredient. A deal containing one inherits it through
+its components.
 
 ---
 

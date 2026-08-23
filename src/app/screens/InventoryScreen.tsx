@@ -14,9 +14,15 @@ export interface InventoryScreenProps {
   stock: StockHandle;
   onPrintReorder: (lines: string[]) => void;
   onOtherBoard: () => void;
+  /** A menu item to open Assign Stock on, arrived at from the Settings menu row. */
+  assignTarget?: string | null;
+  /** Called once the target has been acted on, so it is not honoured twice. */
+  onAssignTargetTaken?: () => void;
 }
 
-export function InventoryScreen({ menu, stock, onPrintReorder, onOtherBoard }: InventoryScreenProps) {
+export function InventoryScreen({
+  menu, stock, onPrintReorder, onOtherBoard, assignTarget, onAssignTargetTaken,
+}: InventoryScreenProps) {
   return (
 
   <ScreenShell section="inventory" onOtherBoard={onOtherBoard}>
@@ -34,6 +40,8 @@ export function InventoryScreen({ menu, stock, onPrintReorder, onOtherBoard }: I
       onStockTake={stock.actions.stockTake}
       onPrintReorder={onPrintReorder}
       onDrainStock={stock.actions.drainStock}
+      assignTarget={assignTarget}
+      onAssignTargetTaken={onAssignTargetTaken}
     />
   </ScreenShell>
   );

@@ -14,6 +14,13 @@ interface AssignScreenProps {
   onSave: (menuItemId: string, rows: { stockItemId: string; quantityPerItem: number }[]) => void;
   /** Told to the section so the shelf sidebar can stand down while editing. */
   onDetailChange?: (open: boolean) => void;
+  /**
+   * A menu item to open the editor on straight away, for arrivals from another
+   * screen — the cost read-out on the Settings menu row is the one caller.
+   */
+  openOn?: string | null;
+  /** Called once `openOn` has been acted on, so it is not acted on twice. */
+  onOpened?: () => void;
 }
 
 /**
@@ -21,7 +28,7 @@ interface AssignScreenProps {
  * contain, so assigning stock to them directly would double-count.
  */
 export function AssignScreen({
-  menuItems, stockItems, assignments, onSave, onDetailChange,
+  menuItems, stockItems, assignments, onSave, onDetailChange, openOn, onOpened,
 }: AssignScreenProps) {
   const [selected, setSelected] = useState<string | null>(null);
   const theme = useSection();
@@ -32,6 +39,21 @@ export function AssignScreen({
   );
 
   const item = assignable.find(mi => mi.id === selected) ?? null;
+
+  /**
+   * Opening straight onto one item, because somebody arrived here asking about
+   * that item and not about the grid.
+   *
+   * A deal is deliberately not assignable — its requirements come from what it
+   * contains — so a request for one is dropped rather than opening an editor
+   * that would double-count. The request is cleared either way: it has been
+   * dealt with, and leaving it set would re-open the editor on the next render.
+   */
+  useEffect(() => {
+    if (!openOn) return;
+    if (assignable.some(mi => mi.id === openOn)) setSelected(openOn);
+    onOpened?.();
+  }, [openOn, assignable, onOpened]);
 
   useEffect(() => { onDetailChange?.(Boolean(item)); }, [item, onDetailChange]);
   useEffect(() => () => onDetailChange?.(false), [onDetailChange]);

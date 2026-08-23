@@ -184,6 +184,26 @@ function AppInner({ onLogout }: { onLogout: () => void }) {
     clearScreenState();
   }, [menu.actions, stock.actions, orders.actions, sessions.actions, history]);
 
+  /**
+   * A menu item to open Assign Stock on, set by the cost read-out in Settings.
+   *
+   * It lives here rather than in either screen because it crosses between them,
+   * and it is cleared the moment Inventory has taken it: left set, coming back
+   * to Inventory later by any other route would drop you into an editor you did
+   * not ask for.
+   */
+  const [assignTarget, setAssignTarget] = useState<string | null>(null);
+
+  const handleAssignStock = useCallback((menuItemId: string) => {
+    setAssignTarget(menuItemId);
+    navigateTo('inventory');
+  }, [navigateTo]);
+
+  // Stable, because Inventory reads it from an effect: a fresh arrow every
+  // render would re-run that effect and could re-open the editor somebody had
+  // just backed out of.
+  const handleAssignTargetTaken = useCallback(() => setAssignTarget(null), []);
+
   const handleOrdersNavigation = useCallback(() => {
     // From Order Mode, the other board is All Orders. From anywhere else it is
     // Order Mode — one control, two destinations, never both on screen.
@@ -215,9 +235,11 @@ function AppInner({ onLogout }: { onLogout: () => void }) {
       <SettingsScreen
         menu={menu}
         settings={settings}
+        stock={stock}
         grillOnBoard={orders.state.grill.length}
         onWipe={handleWipeData}
         onOtherBoard={handleOrdersNavigation}
+        onAssignStock={handleAssignStock}
       />
     );
   } else if (currentView === 'analytics') {
@@ -239,6 +261,8 @@ function AppInner({ onLogout }: { onLogout: () => void }) {
         stock={stock}
         onPrintReorder={settings.actions.printReorderList}
         onOtherBoard={handleOrdersNavigation}
+        assignTarget={assignTarget}
+        onAssignTargetTaken={handleAssignTargetTaken}
       />
     );
   } else if (currentView === 'allOrders') {

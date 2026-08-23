@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
-  ArrowUpDown, Check, GripVertical, Layers, Lock, Monitor, Percent, Plus, Printer, RotateCcw,
-  ShieldCheck, SlidersHorizontal, Trash2, UtensilsCrossed, X,
+  ArrowUpDown, Check, GripVertical, Layers, Lock, Monitor, Percent, Plus, Printer,
+  ShieldCheck, SlidersHorizontal, Trash2, Utensils, UtensilsCrossed, X,
 } from 'lucide-react';
 import { NavActions, NavSlot, NavTab, NavTabs } from '../components/Navigation';
 import { WipeDataPanel, type WipeScope } from '../components/WipeDataPanel';
@@ -16,7 +16,8 @@ import {
   DURATION, EASE, GLIDE, SUCCESS, capitalizeFirst, useReducedMotion,
 } from '../ui';
 import { componentsTotal, isDealItem, isSystemCategory } from '../lib/menu';
-import type { Category, MenuItem } from '../types';
+import { unitCostFor } from '../lib/inventory';
+import type { Category, MenuItem, MenuItemStockAssignment, StockItem } from '../types';
 
 /**
  * Settings, lifted out of App.tsx.
@@ -41,6 +42,11 @@ export interface SettingsViewProps {
   onAddMenuItem: (name: string, price: number, category: string) => void;
   onUpdateMenuItem: (id: string, patch: Partial<MenuItem>) => void;
   onDeleteMenuItem: (id: string) => void;
+  /** The recipes and the shelf, so each menu row can show what one costs to make. */
+  stockAssignments: MenuItemStockAssignment[];
+  stockItems: StockItem[];
+  /** Opens Assign Stock on one menu item. Absent when there is nowhere to go. */
+  onAssignStock?: (menuItemId: string) => void;
 
   grillCapacity: string;
   onGrillCapacity: (value: string) => void;
@@ -118,7 +124,7 @@ export function SettingsView(props: SettingsViewProps) {
 
 function MenuSettings({
   categories, menuItems, onAddCategory, onUpdateCategory, onDeleteCategory, onReorderCategories,
-  onAddMenuItem, onUpdateMenuItem, onDeleteMenuItem,
+  onAddMenuItem, onUpdateMenuItem, onDeleteMenuItem, stockAssignments, stockItems, onAssignStock,
 }: SettingsViewProps) {
   const [addingCategory, setAddingCategory] = useState(false);
   const [categoryName, setCategoryName] = useState('');
@@ -265,6 +271,9 @@ function MenuSettings({
             items={items}
             categories={categories}
             menuItems={menuItems}
+            stockAssignments={stockAssignments}
+            stockItems={stockItems}
+            onAssignStock={onAssignStock}
             confirmDelete={confirmDelete}
             onConfirmDelete={setConfirmDelete}
             onUpdateCategory={onUpdateCategory}
@@ -285,6 +294,9 @@ function MenuSettings({
                   item={item}
                   categories={categories}
                   menuItems={menuItems}
+                  stockAssignments={stockAssignments}
+                  stockItems={stockItems}
+                  onAssignStock={onAssignStock}
                   confirming={confirmDelete === item.id}
                   onConfirmDelete={() => setConfirmDelete(item.id)}
                   onCancelDelete={() => setConfirmDelete(null)}
@@ -319,7 +331,8 @@ function Collapse({ children }: { children: React.ReactNode }) {
 
 /** One category and everything in it. */
 function CategoryPanel({
-  category, items, categories, menuItems, confirmDelete, onConfirmDelete,
+  category, items, categories, menuItems, stockAssignments, stockItems, onAssignStock,
+  confirmDelete, onConfirmDelete,
   onUpdateCategory, onDeleteCategory, onUpdateMenuItem, onDeleteMenuItem, onAddItem,
   canDeleteCategory,
 }: {
@@ -327,6 +340,9 @@ function CategoryPanel({
   items: MenuItem[];
   categories: Category[];
   menuItems: MenuItem[];
+  stockAssignments: MenuItemStockAssignment[];
+  stockItems: StockItem[];
+  onAssignStock?: (menuItemId: string) => void;
   confirmDelete: string | null;
   onConfirmDelete: (id: string | null) => void;
   onUpdateCategory: (id: string, patch: Partial<Category>) => void;
@@ -388,6 +404,9 @@ function CategoryPanel({
               item={item}
               categories={categories}
               menuItems={menuItems}
+              stockAssignments={stockAssignments}
+              stockItems={stockItems}
+              onAssignStock={onAssignStock}
               confirming={confirmDelete === item.id}
               onConfirmDelete={() => onConfirmDelete(item.id)}
               onCancelDelete={() => onConfirmDelete(null)}
@@ -494,12 +513,16 @@ function CategoryReorderList({
 }
 
 function MenuItemRow({
-  item, categories, menuItems, confirming, onConfirmDelete, onCancelDelete, onUpdate, onDelete,
+  item, categories, menuItems, stockAssignments, stockItems, onAssignStock,
+  confirming, onConfirmDelete, onCancelDelete, onUpdate, onDelete,
   showCategory = false,
 }: {
   item: MenuItem;
   categories: Category[];
   menuItems: MenuItem[];
+  stockAssignments: MenuItemStockAssignment[];
+  stockItems: StockItem[];
+  onAssignStock?: (menuItemId: string) => void;
   confirming: boolean;
   onConfirmDelete: () => void;
   onCancelDelete: () => void;
@@ -577,7 +600,13 @@ function MenuItemRow({
           </div>
         )}
 
-        <CostField item={item} onUpdate={onUpdate} />
+        <ResolvedCost
+          item={item}
+          menuItems={menuItems}
+          assignments={stockAssignments}
+          stockItems={stockItems}
+          onAssignStock={onAssignStock}
+        />
 
         {isDeal && (
           <Button
@@ -676,46 +705,60 @@ function MenuItemRow({
 }
 
 /**
- * The ingredient cost, worked out or typed in.
+ * What one of this costs to make, read from the recipe. Not editable here.
  *
- * Left alone it says "from the recipe", which is the honest default and what
- * keeps margins truthful without anyone maintaining them. Typing a figure here
- * overrides it — needed for anything the stock ledger cannot see all of, such
- * as a deal containing something bought in ready-made.
+ * There used to be a field beside the price, writing `MenuItem.unitCostOverride`
+ * — which had no column and was lost on every reload, so a shop that typed a
+ * cost got it back for one session and then quietly got the recipe's answer
+ * instead (ADR-015).
+ *
+ * It is a read-out rather than a persisted field because of what a writable one
+ * did to the screen it sat on. A cost box next to a price box invites the
+ * thought that the price follows the cost, and it does not: a burger is priced
+ * at what a market will pay. And an override at the *dish* is the wrong place
+ * to correct a cost anyway — every dish containing the ingredient is wrong the
+ * same way, so the fix belongs once, at `StockItem.costPerUnit`, where the
+ * Stock Editor already keeps it.
+ *
+ * Tapping it goes to Assign Stock for this item, which is where both the recipe
+ * and the route to the ingredient's cost are.
  */
-function CostField({
-  item, onUpdate,
-}: { item: MenuItem; onUpdate: (patch: Partial<MenuItem>) => void }) {
-  const overridden = item.unitCostOverride !== undefined;
-  const [draft, setDraft] = useState(overridden ? String(item.unitCostOverride) : '');
+function ResolvedCost({
+  item, menuItems, assignments, stockItems, onAssignStock,
+}: {
+  item: MenuItem;
+  menuItems: MenuItem[];
+  assignments: MenuItemStockAssignment[];
+  stockItems: StockItem[];
+  onAssignStock?: (menuItemId: string) => void;
+}) {
+  const resolved = unitCostFor(item, menuItems, assignments, stockItems);
+  const margin = item.price > 0 ? ((item.price - resolved.cost) / item.price) * 100 : null;
+
+  // Missing is not zero (invariant 2). An incomplete recipe says which
+  // ingredient has no cost rather than quoting a figure that leaves it out —
+  // the figure would be low, the margin flattering, and neither would be
+  // marked as partial anywhere the eye would catch it.
+  const label = resolved.complete
+    ? `Rs ${Math.round(resolved.cost)} to make${margin === null ? '' : ` · ${Math.round(margin)}% margin`}`
+    : resolved.missing.length > 0
+      ? `Rs ${Math.round(resolved.cost)} to make · no cost for ${resolved.missing.slice(0, 2).join(' and ')}`
+      : 'Nothing assigned yet — no cost';
 
   return (
-    <span className="flex items-center gap-[6px] shrink-0">
-      <span className="text-[var(--app-text-muted)] text-[12px] font-semibold whitespace-nowrap">
-        Costs me
-      </span>
-      <input
-        inputMode="decimal"
-        value={draft}
-        placeholder="auto"
-        onChange={e => {
-          const next = e.target.value.replace(/[^\d.]/g, '');
-          setDraft(next);
-          const parsed = parseFloat(next);
-          onUpdate({ unitCostOverride: Number.isFinite(parsed) ? parsed : undefined });
-        }}
-        className="w-[78px] bg-[var(--app-bg-darker)] text-[var(--app-text)] text-[14px] font-semibold text-right px-[9px] h-[34px] rounded-[8px] border border-[var(--app-border)] focus:outline-none focus:border-[color:var(--sec)] placeholder:text-[var(--app-text-muted)] placeholder:font-normal"
-        aria-label={`Ingredient cost of one ${item.name}`}
-      />
-      {overridden && (
-        <IconButton
-          variant="quiet" size="sm"
-          aria-label="Go back to working the cost out from the recipe"
-          onClick={() => { setDraft(''); onUpdate({ unitCostOverride: undefined }); }}
-          icon={<RotateCcw size={15} />}
-        />
-      )}
-    </span>
+    <Tooltip label="What one of these uses up, at what the shelf says it cost. Change what it is made of, or what an ingredient costs, under Inventory.">
+      <button
+        type="button"
+        onClick={() => onAssignStock?.(item.id)}
+        disabled={!onAssignStock}
+        data-menu-item-cost={item.id}
+        className="flex items-center gap-[7px] shrink-0 h-[34px] px-[11px] rounded-[8px] border border-[var(--app-border)] bg-[var(--app-bg-darker)] text-[13px] font-semibold disabled:cursor-default"
+        style={{ color: resolved.complete ? 'var(--app-text-secondary)' : DANGER }}
+      >
+        <Utensils size={14} />
+        {label}
+      </button>
+    </Tooltip>
   );
 }
 /* ------------------------------------------------------------------ orders */
