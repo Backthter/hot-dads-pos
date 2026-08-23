@@ -1,0 +1,7 @@
+target/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.vs/
+.DS_Store

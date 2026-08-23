@@ -1,0 +1,25 @@
+[package]
+name = "hot-dads-pos"
+version = "0.1.0"
+description = "Hot Dads POS System"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "hot_dads_pos_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["load_extension", "bundled"] }
+tokio = { version = "1", features = ["net", "io-util", "sync"] }
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pki-types = "1"
+webpki-roots = "0.26"

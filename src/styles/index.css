@@ -1,0 +1,237 @@
+@import './fonts.css';
+@import 'tailwindcss' source(none);
+@source '../../**/*.{js,ts,jsx,tsx}';
+@import 'tw-animate-css';
+@import './default_theme.css';
+@import './globals.css';
+
+/* Baseline interaction behaviour.
+
+   The complaint these answer is that some controls responded to the pointer and
+   some did not, which reads as half-finished rather than as restraint. The
+   shared primitives in `src/app/ui` handle their own hover, focus and press
+   states; this is the floor underneath them, so a plain `<button>` written in
+   passing still behaves like part of the same program.
+
+   Deliberately no `transform` on :active — a scale here would silently override
+   the `translate` that centres absolutely-positioned controls. Brightness does
+   the same job and cannot move anything. */
+button:not(:disabled),
+[role='button']:not([aria-disabled='true']),
+[role='tab'],
+[role='switch'],
+label[for],
+summary,
+select:not(:disabled) {
+  cursor: pointer;
+}
+
+button,
+[role='button'],
+[role='tab'],
+[role='switch'],
+[role='menuitem'],
+a,
+summary,
+select,
+input,
+textarea {
+  transition:
+    background-color 140ms ease,
+    background-image 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease,
+    opacity 140ms ease,
+    filter 140ms ease;
+}
+
+button:active:not(:disabled),
+[role='button']:active:not([aria-disabled='true']),
+[role='menuitem']:active {
+  filter: brightness(0.92);
+}
+
+/* Keyboard users get a visible ring in the section's own colour. The pointer
+   does not, because a ring that appears on every click is noise.
+
+   Text fields are excluded on purpose: the shared `TextInput` already lights
+   its own border and glow on focus, and a second outline around that reads as
+   two rings rather than one. */
+button:focus-visible,
+[role='button']:focus-visible,
+[role='tab']:focus-visible,
+[role='switch']:focus-visible,
+[role='menuitem']:focus-visible,
+a:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--sec, #fe9a00);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Prevent text selection everywhere except in editable fields */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+input, textarea, [contenteditable] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+*::-webkit-scrollbar {
+  width: 3px;
+  height: 3px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* Light panel overrides (right ordering panel) */
+.scrollbar-light {
+  scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
+}
+
+.scrollbar-light::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.scrollbar-light::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.22);
+}
+
+/* Display scale.
+
+   The whole interface is zoomed by `--ui-scale`, so every control, label and
+   touch target grows together and nothing has to be re-tuned by hand. `zoom`
+   (unlike `transform: scale`) participates in layout, so panels still reflow
+   and text still wraps at the larger size.
+
+   The catch: viewport units are not affected by zoom. `100vh` under a 1.15
+   zoom paints 115% of the screen and pushes the bottom of the app out of view.
+   Anything measured against the viewport therefore has to divide the scale back
+   out, which is what these three utilities are for — use them instead of
+   `h-screen`, `w-screen` and `max-h-[80vh]`. */
+:root {
+  --ui-scale: 1;
+}
+
+html {
+  zoom: var(--ui-scale);
+}
+
+.screen-h { height: calc(100vh / var(--ui-scale)); }
+.screen-w { width: calc(100vw / var(--ui-scale)); }
+.sheet-max-h { max-height: calc(80vh / var(--ui-scale)); }
+
+/* Light mode — CSS variables used via bg-[var(--app-bg)] etc. in JSX.
+   Tailwind's arbitrary value syntax resolves these at runtime, so
+   toggling .light on <html> instantly switches all themed colors. */
+:root {
+  --app-bg: #09090b;
+  --app-surface: #27272a;
+  --app-bg-darker: #18181b;
+  --app-bg-tertiary: #3f3f46;
+  --app-border: #27272a;
+  --app-text: #fafafa;
+  --app-text-secondary: #9f9fa9;
+  --app-text-muted: #71717b;
+  --app-text-inverse: #ffffff;
+  --app-order-bg: #f2f2f4;
+  --app-order-card: #ffffff;
+  --app-order-text: #18181b;
+  --app-order-border: #e0e0e4;
+
+  --dropzone-ready-bg: #09191c;
+  --dropzone-ready-border: #0d2f2e;
+  --dropzone-ready-icon: #2a6b66;
+  --dropzone-preparing-bg: #1f0605;
+  --dropzone-preparing-border: #3d1412;
+  --dropzone-preparing-icon: #8a3a35;
+  --dropzone-completed-bg: #0a1f14;
+  --dropzone-completed-border: #0f3523;
+  --dropzone-completed-icon: #1d5c3b;
+  --dropzone-grill-bg: #241505;
+  --dropzone-grill-border: #5a3410;
+  --dropzone-grill-icon: #f79634;
+  --dropzone-editing-bg: #160a24;
+  --dropzone-editing-border: #341a4d;
+  --dropzone-editing-icon: #7c3fb0;
+
+  --sidebar-bg: #18181b;
+}
+
+.light {
+  --app-bg: #fafafa;
+  --app-surface: #e4e4e7;
+  --app-bg-darker: #f4f4f5;
+  --app-bg-tertiary: #d4d4d8;
+  --app-border: #e4e4e7;
+  --app-text: #09090b;
+  --app-text-secondary: #52525b;
+  --app-text-muted: #a1a1aa;
+  --app-order-bg: #18181b;
+  --app-order-card: #27272a;
+  --app-order-text: #fafafa;
+  --app-order-border: #3f3f46;
+
+  --dropzone-ready-bg: rgba(76, 221, 210, 0.08);
+  --dropzone-ready-border: rgba(76, 221, 210, 0.2);
+  --dropzone-ready-icon: #33bfb8;
+  --dropzone-preparing-bg: rgba(249, 98, 78, 0.08);
+  --dropzone-preparing-border: rgba(249, 98, 78, 0.2);
+  --dropzone-preparing-icon: #f9624e;
+  --dropzone-completed-bg: rgba(34, 197, 94, 0.08);
+  --dropzone-completed-border: rgba(34, 197, 94, 0.2);
+  --dropzone-completed-icon: #22c55e;
+  --dropzone-grill-bg: rgba(247, 150, 52, 0.09);
+  --dropzone-grill-border: rgba(247, 150, 52, 0.25);
+  --dropzone-grill-icon: #f79634;
+  --dropzone-editing-bg: rgba(168, 85, 247, 0.08);
+  --dropzone-editing-border: rgba(168, 85, 247, 0.22);
+  --dropzone-editing-icon: #a855f7;
+
+  --sidebar-bg: #18181b;
+}
+
+/* Body/html background sync (override inline styles set by JS) */
+html.light, html.light body {
+  background-color: #fafafa !important;
+}
+
+/* Scrollbar colors for light mode */
+html.light * {
+  scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
+}
+
+html.light *::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+}
+
+html.light *::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.22);
+}

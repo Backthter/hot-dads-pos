@@ -1,0 +1,12 @@
+packages:
+  - '.'
+allowBuilds:
+  '@tailwindcss/oxide': true
+  better-sqlite3: true
+  es5-ext: false
+  esbuild: true
+onlyBuiltDependencies:
+  - '@tailwindcss/oxide@4.1.12'
+  - 'better-sqlite3@12.10.0'
+  - 'esbuild@0.15.18'
+  - 'esbuild@0.25.12'

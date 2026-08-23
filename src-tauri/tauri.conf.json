@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/refs/heads/dev/crates/tauri-config-schema/schema.json",
+  "productName": "Hot Dads POS",
+  "version": "0.1.0",
+  "identifier": "com.hotdads.pos",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Hot Dads POS",
+        "width": 1280,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false,
+        "devtools": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "msi",
+    "icon": [
+      "icon.ico"
+    ],
+    "resources": [],
+    "windows": {
+      "wix": {
+        "language": "en-US",
+        "fragmentPaths": ["./wix/permissions.wxs"],
+        "componentGroupRefs": ["WritableDataDir"]
+      }
+    }
+  }
+}

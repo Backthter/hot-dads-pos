@@ -1,0 +1,195 @@
+import { sqliteTable, text, integer, real, primaryKey } from "drizzle-orm/sqlite-core";
+
+export const items = sqliteTable("items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  price: real("price").notNull().default(0),
+  createdAt: text("created_at").default("datetime('now')"),
+});
+
+export const oldCategories = sqliteTable("categories", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  createdAt: text("created_at").default("datetime('now')"),
+});
+
+export const menuItems = sqliteTable("menu_items", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  price: real("price").notNull().default(0),
+  showInOrderMode: integer("show_in_order_mode").notNull().default(1),
+  category: text("category").notNull().default(""),
+  dealItems: text("deal_items").default("[]"),
+});
+
+export const categoryTable = sqliteTable("app_categories", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  order: integer("category_order").notNull().default(0),
+});
+
+export const orders = sqliteTable("orders", {
+  id: text("id").primaryKey(),
+  seq: integer("seq").notNull().default(0),
+  orderNumber: text("order_number").notNull(),
+  customerName: text("customer_name").notNull().default("Customer"),
+  notes: text("notes").default(""),
+  status: text("status").notNull().default("preparing"),
+  subtotal: real("subtotal").notNull().default(0),
+  discountKind: text("discount_kind"),
+  discountValue: real("discount_value"),
+  discountAmount: real("discount_amount").notNull().default(0),
+  taxRate: real("tax_rate").notNull().default(0),
+  taxAmount: real("tax_amount").notNull().default(0),
+  total: real("total").notNull().default(0),
+  timestamp: integer("timestamp").notNull(),
+  editedAt: integer("edited_at"),
+  editCount: integer("edit_count").notNull().default(0),
+  paid: text("paid"),
+  // Voiding replaces deletion, so history stays reconcilable.
+  voidedAt: integer("voided_at"),
+  voidReason: text("void_reason"),
+  // Stage timestamps — what makes kitchen throughput measurable.
+  grilledAt: integer("grilled_at"),
+  readyAt: integer("ready_at"),
+  completedAt: integer("completed_at"),
+  /** Stored, not derived: a session pauses overnight and its span is not its contents. */
+  sessionId: text("session_id"),
+  sessionTicket: integer("session_ticket"),
+});
+
+/** A container for sessions. Holds no orders of its own. */
+export const tradingEvents = sqliteTable("trading_events", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  notes: text("notes"),
+  createdAt: integer("created_at").notNull(),
+});
+
+/** One service. Saveable and resumable, because a market day is not a calendar day. */
+export const tradingSessions = sqliteTable("trading_sessions", {
+  id: text("id").primaryKey(),
+  eventId: text("event_id"),
+  name: text("name").notNull(),
+  /** 'active' | 'paused' | 'ended'. */
+  status: text("status").notNull().default("active"),
+  startedAt: integer("started_at").notNull(),
+  endedAt: integer("ended_at"),
+  /** Highest ticket issued. Resuming continues from here rather than restarting. */
+  ticketCounter: integer("ticket_counter").notNull().default(0),
+  /** Time spent paused, excluded from trading hours. */
+  pausedMs: integer("paused_ms").notNull().default(0),
+  pausedAt: integer("paused_at"),
+  notes: text("notes"),
+});
+
+/** Costs the POS cannot observe. Ingredients come from the stock ledger instead. */
+export const costEntries = sqliteTable("cost_entries", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id"),
+  amount: real("amount").notNull().default(0),
+  note: text("note").notNull().default(""),
+  /** 'fixed' | 'variable'. Break-even divides by contribution margin, so this matters. */
+  kind: text("kind").notNull().default("fixed"),
+  timestamp: integer("timestamp").notNull(),
+});
+
+export const orderItems = sqliteTable("order_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  orderId: text("order_id").notNull(),
+  menuItemId: text("menu_item_id").notNull(),
+  name: text("name").notNull(),
+  price: real("price").notNull().default(0),
+  quantity: integer("quantity").notNull().default(1),
+  dealItems: text("deal_items").default("[]"),
+  /** Ingredient cost of one, frozen at the moment of sale. NULL ≠ zero. */
+  unitCost: real("unit_cost"),
+  oversoldQuantity: real("oversold_quantity").notNull().default(0),
+});
+
+export const parkedSessions = sqliteTable("parked_sessions", {
+  id: text("id").primaryKey(),
+  label: text("label").notNull(),
+  notes: text("notes").default(""),
+  lastModified: integer("last_modified").notNull(),
+  discountKind: text("discount_kind"),
+  discountValue: real("discount_value"),
+  editingOrderId: text("editing_order_id"),
+});
+
+export const parkedSessionCartItems = sqliteTable("parked_session_cart_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  sessionId: text("session_id").notNull(),
+  menuItemId: text("menu_item_id").notNull(),
+  name: text("name").notNull(),
+  price: real("price").notNull().default(0),
+  quantity: integer("quantity").notNull().default(1),
+  dealItems: text("deal_items").default("[]"),
+});
+
+export const stockItems = sqliteTable("stock_items", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  quantity: real("quantity").notNull().default(0),
+  unit: text("unit").notNull().default("pcs"),
+  lowStockThreshold: real("low_stock_threshold").notNull().default(0),
+  costPerUnit: real("cost_per_unit").notNull().default(0),
+  packetSize: real("packet_size"),
+  packetLabel: text("packet_label"),
+  packetCost: real("packet_cost"),
+  iconId: text("icon_id"),
+  costUpdatedAt: integer("cost_updated_at"),
+});
+
+/** Append-only. Reversals are new rows pointing back, never deletions. */
+export const stockMovements = sqliteTable("stock_movements", {
+  id: text("id").primaryKey(),
+  stockItemId: text("stock_item_id").notNull(),
+  delta: real("delta").notNull().default(0),
+  resulting: real("resulting").notNull().default(0),
+  reason: text("reason").notNull().default("added"),
+  note: text("note"),
+  /** 'order' | 'movement' | 'stocktake' — what caused this line. */
+  referenceType: text("reference_type"),
+  /** The immutable id of the cause. Never a display order number. */
+  referenceId: text("reference_id"),
+  unitCost: real("unit_cost"),
+  totalCost: real("total_cost"),
+  reversed: integer("reversed").notNull().default(0),
+  timestamp: integer("timestamp").notNull(),
+});
+
+/** One row per item per day, so historical value never replays the ledger. */
+export const inventorySnapshots = sqliteTable("inventory_snapshots", {
+  date: text("snapshot_date").notNull(),
+  stockItemId: text("stock_item_id").notNull(),
+  quantity: real("quantity").notNull().default(0),
+  unitCost: real("unit_cost").notNull().default(0),
+  value: real("value").notNull().default(0),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.date, table.stockItemId] }),
+}));
+
+/** Demand that exceeded stock, measured rather than inferred. */
+export const oversellEvents = sqliteTable("oversell_events", {
+  id: text("id").primaryKey(),
+  menuItemId: text("menu_item_id").notNull(),
+  menuItemName: text("menu_item_name").notNull().default(""),
+  quantity: real("quantity").notNull().default(1),
+  bottleneckStockItemId: text("bottleneck_stock_item_id"),
+  orderId: text("order_id"),
+  timestamp: integer("timestamp").notNull(),
+});
+
+export const stockAssignments = sqliteTable("stock_assignments", {
+  menuItemId: text("menu_item_id").notNull(),
+  stockItemId: text("stock_item_id").notNull(),
+  quantityPerItem: real("quantity_per_item").notNull().default(1),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.menuItemId, table.stockItemId] }),
+}));
+
+export const appState = sqliteTable("app_state", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+});

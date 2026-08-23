@@ -1,0 +1,1579 @@
+import { resolveDealComponent } from '../lib/inventory';
+import { sessionTradingHours } from '../lib/sessions';
+import type {
+  CartItem, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
+  OversellEvent, StockItem, StockMovement, TradingSession,
+} from '../types';
+
+/**
+ * The analytics engine. No React, no formatting decisions — just facts derived
+ * from stored records, so every number on screen can be traced back to rows.
+ *
+ * Two rules run through all of it:
+ *
+ *  - **Voided orders are not revenue.** They stay in the data because a
+ *    cancelled sale is a fact worth keeping, but every money figure excludes
+ *    them.
+ *  - **Missing cost is not zero cost.** A line with no `unitCost` was never
+ *    costed; counting it as free would report a 100% margin. Those lines are
+ *    counted separately and surfaced as a coverage figure, so profit is either
+ *    trustworthy or visibly incomplete.
+ */
+
+/* ------------------------------------------------------------------ ranges */
+
+export interface DateRange {
+  /** Inclusive start, ms. */
+  start: number;
+  /** Exclusive end, ms. */
+  end: number;
+  label: string;
+}
+
+export type RangePreset =
+  | 'today' | 'yesterday' | 'last7' | 'last30' | 'thisMonth' | 'lastMonth'
+  | 'thisQuarter' | 'thisYear' | 'all' | 'custom';
+
+const DAY = 24 * 60 * 60 * 1000;
+
+const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+
+export function resolveRange(
+  preset: RangePreset,
+  custom?: { start: number; end: number },
+  now = Date.now(),
+): DateRange {
+  const today = startOfDay(new Date(now));
+  const d = new Date(now);
+
+  switch (preset) {
+    case 'today': return { start: today, end: today + DAY, label: 'Today' };
+    case 'yesterday': return { start: today - DAY, end: today, label: 'Yesterday' };
+    case 'last7': return { start: today - 6 * DAY, end: today + DAY, label: 'Last 7 days' };
+    case 'last30': return { start: today - 29 * DAY, end: today + DAY, label: 'Last 30 days' };
+    case 'thisMonth':
+      return {
+        start: new Date(d.getFullYear(), d.getMonth(), 1).getTime(),
+        end: new Date(d.getFullYear(), d.getMonth() + 1, 1).getTime(),
+        label: 'This month',
+      };
+    case 'lastMonth':
+      return {
+        start: new Date(d.getFullYear(), d.getMonth() - 1, 1).getTime(),
+        end: new Date(d.getFullYear(), d.getMonth(), 1).getTime(),
+        label: 'Last month',
+      };
+    case 'thisQuarter': {
+      const q = Math.floor(d.getMonth() / 3) * 3;
+      return {
+        start: new Date(d.getFullYear(), q, 1).getTime(),
+        end: new Date(d.getFullYear(), q + 3, 1).getTime(),
+        label: 'This quarter',
+      };
+    }
+    case 'thisYear':
+      return {
+        start: new Date(d.getFullYear(), 0, 1).getTime(),
+        end: new Date(d.getFullYear() + 1, 0, 1).getTime(),
+        label: 'This year',
+      };
+    case 'custom':
+      return { start: custom?.start ?? today, end: custom?.end ?? today + DAY, label: 'Custom' };
+    case 'all':
+    default:
+      return { start: 0, end: now + DAY, label: 'All time' };
+  }
+}
+
+/** The equivalent window immediately before this one, for comparisons. */
+export function previousRange(range: DateRange): DateRange {
+  const span = range.end - range.start;
+  return { start: range.start - span, end: range.start, label: 'Previous period' };
+}
+
+/* ------------------------------------------------------------------ totals */
+
+export interface OrderMoney {
+  /** Sum of line prices before discount. */
+  gross: number;
+  discount: number;
+  tax: number;
+  /** gross − discount. Tax is a pass-through and is not revenue. */
+  netRevenue: number;
+  /** What the customer actually paid, tax included. */
+  collected: number;
+  /** Cost of the lines that have one. */
+  cogs: number;
+  /** netRevenue of the lines that have a cost — the comparable part of it. */
+  costedRevenue: number;
+  /** Lines with a cost ÷ all lines, 0..1. */
+  costCoverage: number;
+  units: number;
+  lines: number;
+}
+
+/**
+ * Money for one order.
+ *
+ * Tax is excluded from revenue: it is collected on behalf of the state and
+ * passing it through the profit line would flatter every figure. `collected` is
+ * kept separately for reconciling the till.
+ *
+ * COGS only counts lines that carry a cost snapshot, and `costedRevenue` is the
+ * revenue of exactly those lines — so margin is computed over a like-for-like
+ * base rather than dividing a partial cost by a complete revenue.
+ */
+export function orderMoney(order: Order): OrderMoney {
+  let gross = 0;
+  let units = 0;
+  let cogs = 0;
+  let costedGross = 0;
+  let costedLines = 0;
+
+  for (const item of order.items) {
+    const lineGross = item.price * item.quantity;
+    gross += lineGross;
+    units += item.quantity;
+    if (item.unitCost !== undefined) {
+      cogs += item.unitCost * item.quantity;
+      costedGross += lineGross;
+      costedLines += 1;
+    }
+  }
+
+  const discount = order.discountAmount ?? 0;
+  const netRevenue = gross - discount;
+  // Spread the discount over the costed lines in proportion to their price.
+  const costedShare = gross > 0 ? costedGross / gross : 0;
+
+  return {
+    gross,
+    discount,
+    tax: order.taxAmount ?? 0,
+    netRevenue,
+    collected: netRevenue + (order.taxAmount ?? 0),
+    cogs,
+    costedRevenue: netRevenue * costedShare,
+    costCoverage: order.items.length > 0 ? costedLines / order.items.length : 0,
+    units,
+    lines: order.items.length,
+  };
+}
+
+export interface Totals {
+  orders: number;
+  voided: number;
+  units: number;
+  gross: number;
+  discount: number;
+  tax: number;
+  netRevenue: number;
+  collected: number;
+  cogs: number;
+  costedRevenue: number;
+  grossProfit: number;
+  /** Null when no line in the period carries a cost — not zero. */
+  grossMarginPct: number | null;
+  /** Share of lines that carry a cost, 0..1. Drives the honesty banner. */
+  costCoverage: number;
+  averageOrderValue: number;
+  averageUnitsPerOrder: number;
+  discountRatePct: number;
+  cash: number;
+  transfer: number;
+}
+
+export function emptyTotals(): Totals {
+  return {
+    orders: 0, voided: 0, units: 0, gross: 0, discount: 0, tax: 0, netRevenue: 0,
+    collected: 0, cogs: 0, costedRevenue: 0, grossProfit: 0, grossMarginPct: null,
+    costCoverage: 0, averageOrderValue: 0, averageUnitsPerOrder: 0, discountRatePct: 0,
+    cash: 0, transfer: 0,
+  };
+}
+
+/** Aggregates a set of orders. Voids are counted but contribute no money. */
+export function totalsFor(orders: Order[]): Totals {
+  const t = emptyTotals();
+  let costedLines = 0;
+  let allLines = 0;
+
+  for (const order of orders) {
+    if (order.voidedAt) { t.voided += 1; continue; }
+    const m = orderMoney(order);
+    t.orders += 1;
+    t.units += m.units;
+    t.gross += m.gross;
+    t.discount += m.discount;
+    t.tax += m.tax;
+    t.netRevenue += m.netRevenue;
+    t.collected += m.collected;
+    t.cogs += m.cogs;
+    t.costedRevenue += m.costedRevenue;
+    allLines += m.lines;
+    costedLines += m.lines * m.costCoverage;
+    if (order.paid === 'cash') t.cash += m.collected;
+    if (order.paid === 'transfer') t.transfer += m.collected;
+  }
+
+  t.grossProfit = t.costedRevenue - t.cogs;
+  t.grossMarginPct = t.costedRevenue > 0 ? (t.grossProfit / t.costedRevenue) * 100 : null;
+  t.costCoverage = allLines > 0 ? costedLines / allLines : 0;
+  t.averageOrderValue = t.orders > 0 ? t.netRevenue / t.orders : 0;
+  t.averageUnitsPerOrder = t.orders > 0 ? t.units / t.orders : 0;
+  t.discountRatePct = t.gross > 0 ? (t.discount / t.gross) * 100 : 0;
+  return t;
+}
+
+export function inRange(order: Order, range: DateRange): boolean {
+  return order.timestamp >= range.start && order.timestamp < range.end;
+}
+
+export function ordersInRange(orders: Order[], range: DateRange): Order[] {
+  return orders.filter(o => inRange(o, range));
+}
+
+/* -------------------------------------------------------------- item level */
+
+export interface ItemPerformance {
+  menuItemId: string;
+  name: string;
+  category: string;
+  units: number;
+  netRevenue: number;
+  cogs: number;
+  grossProfit: number;
+  marginPct: number | null;
+  orders: number;
+  costed: boolean;
+  /** Units customers asked for that could not be made. */
+  oversold: number;
+}
+
+/**
+ * Per-item performance.
+ *
+ * Deals are counted twice on purpose, in two different senses: the deal itself
+ * carries the revenue, and its components are credited with the units, because
+ * "how many burgers went out" has to include the ones inside deals. Revenue is
+ * never double-counted — components get units and no money.
+ */
+export function itemPerformance(
+  orders: Order[],
+  menuItems: MenuItem[],
+  range: DateRange,
+): ItemPerformance[] {
+  const rows = new Map<string, ItemPerformance>();
+  const key = (id: string, name: string) => {
+    if (!rows.has(id)) {
+      rows.set(id, {
+        menuItemId: id,
+        name,
+        category: menuItems.find(m => m.id === id)?.category ?? '',
+        units: 0, netRevenue: 0, cogs: 0, grossProfit: 0, marginPct: null,
+        orders: 0, costed: true, oversold: 0,
+      });
+    }
+    return rows.get(id)!;
+  };
+
+  for (const order of orders) {
+    if (order.voidedAt || !inRange(order, range)) continue;
+    const money = orderMoney(order);
+    // Discounts are order-level; share them across lines by value.
+    const discountShare = money.gross > 0 ? money.discount / money.gross : 0;
+
+    for (const item of order.items) {
+      const row = key(item.menuItemId, item.name);
+      const lineGross = item.price * item.quantity;
+      row.netRevenue += lineGross * (1 - discountShare);
+      row.orders += 1;
+      row.oversold += item.oversoldQuantity ?? 0;
+      if (item.unitCost !== undefined) row.cogs += item.unitCost * item.quantity;
+      else row.costed = false;
+
+      const isDeal = Boolean(item.dealItems?.length);
+      if (!isDeal) {
+        row.units += item.quantity;
+      } else {
+        // Credit the components with the units they actually represent.
+        for (const component of item.dealItems!) {
+          const sub = resolveDealComponent(component, menuItems);
+          if (!sub) continue;
+          key(sub.id, sub.name).units += component.quantity * item.quantity;
+        }
+      }
+    }
+  }
+
+  for (const row of rows.values()) {
+    row.grossProfit = row.costed ? row.netRevenue - row.cogs : 0;
+    row.marginPct = row.costed && row.netRevenue > 0
+      ? (row.grossProfit / row.netRevenue) * 100
+      : null;
+  }
+
+  return [...rows.values()].sort((a, b) => b.netRevenue - a.netRevenue);
+}
+
+export interface CategoryPerformance {
+  category: string;
+  units: number;
+  netRevenue: number;
+  share: number;
+}
+
+export function categoryPerformance(items: ItemPerformance[]): CategoryPerformance[] {
+  const totals = new Map<string, CategoryPerformance>();
+  let revenue = 0;
+  for (const item of items) {
+    const name = item.category || 'Uncategorised';
+    const row = totals.get(name) ?? { category: name, units: 0, netRevenue: 0, share: 0 };
+    row.units += item.units;
+    row.netRevenue += item.netRevenue;
+    revenue += item.netRevenue;
+    totals.set(name, row);
+  }
+  for (const row of totals.values()) row.share = revenue > 0 ? row.netRevenue / revenue : 0;
+  return [...totals.values()].sort((a, b) => b.netRevenue - a.netRevenue);
+}
+
+/* -------------------------------------------------------------- over time */
+
+export type Grain = 'hour' | 'day' | 'week' | 'month';
+
+export interface Bucket {
+  /** Start of the bucket, ms. */
+  key: number;
+  label: string;
+  totals: Totals;
+}
+
+function bucketStart(ts: number, grain: Grain): number {
+  const d = new Date(ts);
+  switch (grain) {
+    case 'hour': return new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours()).getTime();
+    case 'day': return startOfDay(d);
+    case 'week': {
+      const day = (d.getDay() + 6) % 7;   // Monday-first
+      return startOfDay(new Date(d.getFullYear(), d.getMonth(), d.getDate() - day));
+    }
+    case 'month': return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+  }
+}
+
+const LABELS: Record<Grain, Intl.DateTimeFormatOptions> = {
+  hour: { hour: 'numeric' },
+  day: { day: 'numeric', month: 'short' },
+  week: { day: 'numeric', month: 'short' },
+  month: { month: 'short', year: '2-digit' },
+};
+
+/**
+ * Groups orders into time buckets.
+ *
+ * Only buckets that actually contain trading are returned. Filling in the empty
+ * ones would be right for a shop that opens every day and wrong here: this
+ * business trades on event days, and a chart padded with structural zeroes says
+ * "sales collapsed" when it means "there was no market that week".
+ */
+export function bucketsFor(orders: Order[], range: DateRange, grain: Grain): Bucket[] {
+  const map = new Map<number, Order[]>();
+  for (const order of orders) {
+    if (!inRange(order, range)) continue;
+    const key = bucketStart(order.timestamp, grain);
+    const list = map.get(key);
+    if (list) list.push(order); else map.set(key, [order]);
+  }
+  return [...map.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([key, list]) => ({
+      key,
+      label: new Date(key).toLocaleDateString(undefined, LABELS[grain]),
+      totals: totalsFor(list),
+    }));
+}
+
+/** Picks a sensible grain for the span, so a year is not charted by the hour. */
+export function grainFor(range: DateRange): Grain {
+  const span = range.end - range.start;
+  if (span <= 2 * DAY) return 'hour';
+  if (span <= 70 * DAY) return 'day';
+  if (span <= 400 * DAY) return 'week';
+  return 'month';
+}
+
+/* ----------------------------------------------------------- trading hours */
+
+export interface TradingHour {
+  /** 0–23. */
+  hour: number;
+  orders: number;
+  netRevenue: number;
+  units: number;
+}
+
+/**
+ * Sales by hour of day, across whatever days traded.
+ *
+ * For a business that works events this is the most useful shape there is: the
+ * within-service curve is far more stable than the day-to-day totals.
+ */
+export function tradingHours(orders: Order[], range: DateRange): TradingHour[] {
+  const rows: TradingHour[] = Array.from({ length: 24 }, (_, hour) => ({
+    hour, orders: 0, netRevenue: 0, units: 0,
+  }));
+  for (const order of orders) {
+    if (order.voidedAt || !inRange(order, range)) continue;
+    const money = orderMoney(order);
+    const row = rows[new Date(order.timestamp).getHours()];
+    row.orders += 1;
+    row.netRevenue += money.netRevenue;
+    row.units += money.units;
+  }
+  return rows;
+}
+
+/** Distinct clock hours in which anything was sold — the real trading time. */
+export function activeTradingHours(orders: Order[], range: DateRange): number {
+  const hours = new Set<number>();
+  for (const order of orders) {
+    if (order.voidedAt || !inRange(order, range)) continue;
+    hours.add(Math.floor(order.timestamp / (60 * 60 * 1000)));
+  }
+  return hours.size;
+}
+
+/* -------------------------------------------------------------- kitchen */
+
+export interface ThroughputStats {
+  /** Orders that reached Ready and can therefore be measured. */
+  measured: number;
+  medianToReadyMs: number | null;
+  p90ToReadyMs: number | null;
+  medianOnGrillMs: number | null;
+  /**
+   * The mean time a ticket spends on the grill.
+   *
+   * Shown in place of the median, which was the figure here before. For a queue
+   * time the median is the better statistic — it describes what a typical
+   * customer waits and ignores the one ticket that sat forgotten. Grill time is
+   * being read as a capacity number rather than an experience one: how long a
+   * slot is occupied, and therefore how many tickets an hour the grill can
+   * clear. That is a question about the total, and the mean is the figure that
+   * multiplies back out to the total. The median does not.
+   */
+  averageOnGrillMs: number | null;
+  /** Orders per hour of trading, at the busiest hour of the period. */
+  peakOrdersPerHour: number;
+}
+
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function percentile(values: number[], p: number): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))];
+}
+
+/**
+ * How fast the kitchen actually turns tickets around.
+ *
+ * Only orders with the relevant stamps are measured — these were added part-way
+ * through the app's life and cannot be back-filled, so `measured` says how much
+ * of the period the figures actually cover.
+ */
+export function throughput(orders: Order[], range: DateRange): ThroughputStats {
+  const toReady: number[] = [];
+  const onGrill: number[] = [];
+  const perHour = new Map<number, number>();
+
+  for (const order of orders) {
+    if (order.voidedAt || !inRange(order, range)) continue;
+    const hour = Math.floor(order.timestamp / (60 * 60 * 1000));
+    perHour.set(hour, (perHour.get(hour) ?? 0) + 1);
+
+    const ready = order.readyAt ?? order.completedAt;
+    if (ready && ready > order.timestamp) toReady.push(ready - order.timestamp);
+    if (order.grilledAt && ready && ready > order.grilledAt) onGrill.push(ready - order.grilledAt);
+  }
+
+  return {
+    measured: toReady.length,
+    medianToReadyMs: median(toReady),
+    p90ToReadyMs: percentile(toReady, 90),
+    medianOnGrillMs: median(onGrill),
+    averageOnGrillMs: mean(onGrill),
+    peakOrdersPerHour: perHour.size > 0 ? Math.max(...perHour.values()) : 0,
+  };
+}
+
+function mean(values: number[]): number | null {
+  if (values.length === 0) return null;
+  return values.reduce((sum, v) => sum + v, 0) / values.length;
+}
+
+/**
+ * How many of one particular thing you would have to sell to break even.
+ *
+ * "You need to sell 61 units" is not a sentence anybody can act on: units of
+ * what? At an average price nothing is actually sold at? This answers the
+ * question in things that exist — 34 burgers, or 51 cokes — because the number
+ * that matters is different for every item, and the cheap one is a much longer
+ * day than the expensive one.
+ */
+export interface ItemBreakEven {
+  menuItemId: string;
+  name: string;
+  /** What one of these leaves behind after ingredients and per-sale costs. */
+  contributionPerUnit: number;
+  /** How many you would have to sell, on their own, to cover the fixed costs. */
+  units: number;
+  /** How many have sold in this period already. */
+  sold: number;
+}
+
+export function breakEvenByItem(
+  items: ItemPerformance[],
+  costs: CostSummary,
+  totals: Totals,
+): ItemBreakEven[] {
+  if (costs.fixed <= 0) return [];
+
+  // Variable costs are spread across revenue, because that is the only thing
+  // they are known in proportion to.
+  const variableRatio = totals.netRevenue > 0 ? costs.variable / totals.netRevenue : 0;
+
+  return items
+    .filter(item => item.costed && item.units > 0)
+    .map(item => {
+      const price = item.netRevenue / item.units;
+      const contributionPerUnit = (item.netRevenue - item.cogs) / item.units - price * variableRatio;
+      return {
+        menuItemId: item.menuItemId,
+        name: item.name,
+        contributionPerUnit,
+        units: contributionPerUnit > 0 ? costs.fixed / contributionPerUnit : Infinity,
+        sold: item.units,
+      };
+    })
+    .filter(row => Number.isFinite(row.units) && row.contributionPerUnit > 0)
+    // Best earner first: the shortest route to covering the day.
+    .sort((a, b) => a.units - b.units);
+}
+
+/**
+ * What was spent on stock in a window, at what it actually cost.
+ *
+ * Separate from `foodCost`, which measures what was *consumed*. Money spent
+ * stocking up for a market leaves the till whether or not it all sells, and a
+ * stall owner asking "did today pay for itself" usually means the outlay, not
+ * the portion that happened to be eaten.
+ */
+export function stockPurchasesValue(
+  movements: StockMovement[],
+  stockItems: StockItem[],
+  from: number,
+  to: number,
+): number {
+  let total = 0;
+  for (const m of movements) {
+    if (m.timestamp < from || m.timestamp >= to) continue;
+    if (m.delta <= 0 || m.reversed) continue;
+    if (m.reason !== 'added' && m.reason !== 'packet') continue;
+    const unit = m.unitCost ?? stockItems.find(s => s.id === m.stockItemId)?.costPerUnit ?? 0;
+    total += m.totalCost ?? unit * m.delta;
+  }
+  return total;
+}
+
+export interface QueueBand {
+  label: string;
+  /** Inclusive lower bound in minutes. */
+  from: number;
+  /** Exclusive upper bound, or null for the open-ended top band. */
+  to: number | null;
+  orders: number;
+  share: number;
+}
+
+/**
+ * The spread of queue times, not just the middle of it.
+ *
+ * A median of six minutes with a long tail of twenty-minute waits is a different
+ * service from a median of six minutes and nothing over ten, and no single
+ * number distinguishes them. The bands are fixed rather than computed so the
+ * shape stays comparable between sessions.
+ */
+export function queueBands(orders: Order[], range: DateRange): QueueBand[] {
+  const edges: { label: string; from: number; to: number | null }[] = [
+    { label: '<2 min', from: 0, to: 2 },
+    { label: '2–5', from: 2, to: 5 },
+    { label: '5–10', from: 5, to: 10 },
+    { label: '10–20', from: 10, to: 20 },
+    { label: '20+', from: 20, to: null },
+  ];
+  const bands: QueueBand[] = edges.map(e => ({ ...e, orders: 0, share: 0 }));
+  let measured = 0;
+
+  for (const order of orders) {
+    if (order.voidedAt || !inRange(order, range)) continue;
+    const ready = order.readyAt ?? order.completedAt;
+    if (!ready || ready <= order.timestamp) continue;
+    const minutes = (ready - order.timestamp) / 60000;
+    measured += 1;
+    const band = bands.find(b => minutes >= b.from && (b.to === null || minutes < b.to));
+    if (band) band.orders += 1;
+  }
+
+  for (const band of bands) band.share = measured > 0 ? band.orders / measured : 0;
+  return bands;
+}
+
+/* ------------------------------------------------------------- inventory */
+
+export interface InventoryValue {
+  total: number;
+  /** Items with no cost recorded, so their stock is worth an unknown amount. */
+  uncosted: number;
+  items: { item: StockItem; value: number }[];
+}
+
+export function inventoryValue(stockItems: StockItem[]): InventoryValue {
+  const items = stockItems.map(item => ({ item, value: item.quantity * (item.costPerUnit || 0) }));
+  return {
+    total: items.reduce((sum, r) => sum + r.value, 0),
+    uncosted: stockItems.filter(s => !(s.costPerUnit > 0)).length,
+    items: items.sort((a, b) => b.value - a.value),
+  };
+}
+
+/** Waste and stock-take shrinkage, valued at the item's cost. */
+export function shrinkageValue(
+  movements: StockMovement[],
+  stockItems: StockItem[],
+  range: DateRange,
+): { waste: number; variance: number } {
+  let waste = 0;
+  let variance = 0;
+  for (const m of movements) {
+    if (m.timestamp < range.start || m.timestamp >= range.end) continue;
+    if (m.delta >= 0) continue;
+    const item = stockItems.find(s => s.id === m.stockItemId);
+    const value = -m.delta * (item?.costPerUnit ?? 0);
+    // Drained stock left without being sold, exactly like waste — counting it
+    // anywhere else would make the end of a market look like free money.
+    if (m.reason === 'waste' || m.reason === 'drained') waste += value;
+    if (m.reason === 'stocktake') variance += value;
+  }
+  return { waste, variance };
+}
+
+/* ------------------------------------------------------------- sessions */
+
+export interface SessionPerformance {
+  sessionId: string;
+  name: string;
+  startedAt: number;
+  totals: Totals;
+  /** Wall-clock hours the session traded, pauses excluded. */
+  tradingHours: number;
+  /** Net revenue ÷ trading hours. Null when the session has not traded yet. */
+  revenuePerHour: number | null;
+}
+
+/**
+ * Per-session figures.
+ *
+ * Trading hours come from the session's own clock rather than from the hours in
+ * which something happened to sell. A quiet hour in the middle of a market is
+ * still an hour of standing there paying for the pitch, and counting only the
+ * hours with sales in them would report a slow day as an efficient one.
+ */
+export function sessionPerformance(
+  orders: Order[],
+  sessions: TradingSession[],
+  now = Date.now(),
+): SessionPerformance[] {
+  const byId = new Map<string, Order[]>();
+  for (const order of orders) {
+    if (!order.sessionId) continue;
+    const list = byId.get(order.sessionId);
+    if (list) list.push(order); else byId.set(order.sessionId, [order]);
+  }
+
+  return sessions
+    .map(session => {
+      const totals = totalsFor(byId.get(session.id) ?? []);
+      const tradingHours = sessionTradingHours(session, now);
+      return {
+        sessionId: session.id,
+        name: session.name,
+        startedAt: session.startedAt,
+        totals,
+        tradingHours,
+        revenuePerHour: tradingHours > 0 ? totals.netRevenue / tradingHours : null,
+      };
+    })
+    .sort((a, b) => a.startedAt - b.startedAt);
+}
+
+export interface EventPerformance {
+  eventId: string;
+  name: string;
+  startedAt: number;
+  sessions: number;
+  totals: Totals;
+  tradingHours: number;
+  revenuePerHour: number | null;
+}
+
+/**
+ * Revenue by event.
+ *
+ * `groups` comes from `eventGroups`, which already presents an ungrouped
+ * session as an event of one — so a business that never bothers grouping still
+ * gets a complete chart rather than an empty one.
+ */
+export function eventPerformance(
+  orders: Order[],
+  groups: { id: string; name: string; sessions: TradingSession[]; startedAt: number }[],
+  now = Date.now(),
+): EventPerformance[] {
+  return groups
+    .map(group => {
+      const ids = new Set(group.sessions.map(s => s.id));
+      const members = orders.filter(o => o.sessionId !== undefined && ids.has(o.sessionId));
+      const tradingHours = group.sessions.reduce(
+        (sum, s) => sum + sessionTradingHours(s, now), 0);
+      const totals = totalsFor(members);
+      return {
+        eventId: group.id,
+        name: group.name,
+        startedAt: group.startedAt,
+        sessions: group.sessions.length,
+        totals,
+        tradingHours,
+        revenuePerHour: tradingHours > 0 ? totals.netRevenue / tradingHours : null,
+      };
+    })
+    .sort((a, b) => a.startedAt - b.startedAt);
+}
+
+/* ------------------------------------------------------------ break-even */
+
+export interface CostSummary {
+  fixed: number;
+  variable: number;
+  total: number;
+  entries: number;
+}
+
+export function costSummary(costs: CostEntry[]): CostSummary {
+  let fixed = 0;
+  let variable = 0;
+  for (const c of costs) {
+    if (c.kind === 'variable') variable += c.amount; else fixed += c.amount;
+  }
+  return { fixed, variable, total: fixed + variable, entries: costs.length };
+}
+
+export interface BreakEven {
+  fixedCosts: number;
+  variableCosts: number;
+  /** Share of each rupee of revenue left after ingredients and variable costs. */
+  contributionRatio: number | null;
+  /** Rupees of contribution per unit sold. */
+  contributionPerUnit: number | null;
+  revenue: number | null;
+  units: number | null;
+  /** Net revenue ÷ break-even revenue, 0..n. Null when break-even is unknown. */
+  progress: number | null;
+  /** Why the figure is unavailable, when it is. */
+  blocked?: string;
+}
+
+/**
+ * What has to be sold before the day pays for itself.
+ *
+ * Break-even is fixed costs ÷ contribution margin. Contribution is what a sale
+ * leaves behind after the costs that scale with it: ingredients, from the stock
+ * ledger, plus anything logged as a variable cost.
+ *
+ * Three things can make this unanswerable, and each is reported rather than
+ * papered over with a zero:
+ *
+ *  - no fixed costs logged, so there is nothing to break even against;
+ *  - no costed sales, so contribution cannot be measured;
+ *  - contribution at or below zero, where no volume ever breaks even and the
+ *    number would be a meaningless infinity.
+ */
+export function breakEven(totals: Totals, costs: CostSummary): BreakEven {
+  const base: BreakEven = {
+    fixedCosts: costs.fixed,
+    variableCosts: costs.variable,
+    contributionRatio: null,
+    contributionPerUnit: null,
+    revenue: null,
+    units: null,
+    progress: null,
+  };
+
+  if (totals.costedRevenue <= 0) {
+    return { ...base, blocked: 'Needs costed sales' };
+  }
+
+  // Margin is measured over the costed lines, then variable costs are taken off
+  // as a share of all revenue — the only common denominator the two have.
+  const grossRatio = (totals.costedRevenue - totals.cogs) / totals.costedRevenue;
+  const variableRatio = totals.netRevenue > 0 ? costs.variable / totals.netRevenue : 0;
+  const contributionRatio = grossRatio - variableRatio;
+  const averagePrice = totals.units > 0 ? totals.netRevenue / totals.units : 0;
+  const contributionPerUnit = averagePrice * contributionRatio;
+
+  if (costs.fixed <= 0) {
+    return {
+      ...base,
+      contributionRatio,
+      contributionPerUnit,
+      blocked: 'No fixed costs logged',
+    };
+  }
+  if (contributionRatio <= 0) {
+    return {
+      ...base,
+      contributionRatio,
+      contributionPerUnit,
+      blocked: 'Costs exceed the margin — no volume breaks even',
+    };
+  }
+
+  const revenue = costs.fixed / contributionRatio;
+  return {
+    ...base,
+    contributionRatio,
+    contributionPerUnit,
+    revenue,
+    units: contributionPerUnit > 0 ? costs.fixed / contributionPerUnit : null,
+    progress: revenue > 0 ? totals.netRevenue / revenue : null,
+  };
+}
+
+/* ------------------------------------------------------------ void rate */
+
+export interface VoidStats {
+  voided: number;
+  live: number;
+  /** Voided ÷ all tickets rung up, as a percentage. */
+  byCountPct: number;
+  /** Value that was rung up and then cancelled. */
+  voidedValue: number;
+  /** Voided value ÷ (voided value + net revenue), as a percentage. */
+  byValuePct: number;
+}
+
+/**
+ * How much of what was rung up did not stay sold.
+ *
+ * Reported by count and by value, because they answer different questions: a
+ * 2% void rate made of the day's three largest orders is not a small problem,
+ * and a count alone hides that. The app has no separate refund concept — a
+ * cancelled sale is a void whether or not money had changed hands — so this is
+ * the whole of it.
+ */
+export function voidStats(orders: Order[]): VoidStats {
+  let voided = 0;
+  let live = 0;
+  let voidedValue = 0;
+  let liveValue = 0;
+
+  for (const order of orders) {
+    if (order.voidedAt) {
+      voided += 1;
+      voidedValue += Math.max(0, (order.subtotal ?? 0) - (order.discountAmount ?? 0));
+    } else {
+      live += 1;
+      liveValue += orderMoney(order).netRevenue;
+    }
+  }
+
+  const tickets = voided + live;
+  const value = voidedValue + liveValue;
+  return {
+    voided,
+    live,
+    byCountPct: tickets > 0 ? (voided / tickets) * 100 : 0,
+    voidedValue,
+    byValuePct: value > 0 ? (voidedValue / value) * 100 : 0,
+  };
+}
+
+/* ------------------------------------------------------- attachment rate */
+
+export interface ItemPair {
+  aId: string;
+  bId: string;
+  aName: string;
+  bName: string;
+  /** Orders containing both. */
+  together: number;
+  /** Orders containing A that also contain B, as a percentage. */
+  attachmentPct: number;
+  /** Reverse direction, for reading the pair the other way round. */
+  reverseAttachmentPct: number;
+  /**
+   * How much more often they appear together than they would by chance. 1.0 is
+   * coincidence; above 1 is a real association.
+   */
+  lift: number;
+}
+
+/**
+ * Which products get bought together.
+ *
+ * Attachment is directional — 90% of chips orders include a burger, while 20%
+ * of burger orders include chips — so both directions are kept and the caller
+ * decides which reads better.
+ *
+ * Lift is what stops the table filling up with the two bestsellers. Two popular
+ * items co-occur constantly without being related at all; lift divides that out
+ * by asking whether they appear together more often than their individual
+ * popularity would predict.
+ */
+export function attachmentPairs(
+  orders: Order[],
+  menuItems: MenuItem[],
+  range: DateRange,
+  minTogether = 2,
+): ItemPair[] {
+  const names = new Map(menuItems.map(m => [m.id, m.name]));
+  const single = new Map<string, number>();
+  const pairs = new Map<string, number>();
+  let baskets = 0;
+
+  for (const order of orders) {
+    if (order.voidedAt || !inRange(order, range)) continue;
+    const ids = [...new Set(order.items.map(i => i.menuItemId))].sort();
+    if (ids.length === 0) continue;
+    baskets += 1;
+    for (const id of ids) single.set(id, (single.get(id) ?? 0) + 1);
+    for (let i = 0; i < ids.length; i += 1) {
+      for (let j = i + 1; j < ids.length; j += 1) {
+        const key = `${ids[i]}|${ids[j]}`;
+        pairs.set(key, (pairs.get(key) ?? 0) + 1);
+      }
+    }
+  }
+
+  if (baskets === 0) return [];
+
+  const rows: ItemPair[] = [];
+  for (const [key, together] of pairs) {
+    if (together < minTogether) continue;
+    const [aId, bId] = key.split('|');
+    const aCount = single.get(aId) ?? 0;
+    const bCount = single.get(bId) ?? 0;
+    if (aCount === 0 || bCount === 0) continue;
+    const expected = (aCount / baskets) * (bCount / baskets) * baskets;
+    rows.push({
+      aId,
+      bId,
+      aName: names.get(aId) ?? aId,
+      bName: names.get(bId) ?? bId,
+      together,
+      attachmentPct: (together / aCount) * 100,
+      reverseAttachmentPct: (together / bCount) * 100,
+      lift: expected > 0 ? together / expected : 0,
+    });
+  }
+
+  return rows.sort((a, b) => b.together - a.together);
+}
+
+/* ------------------------------------------------------ popularity trend */
+
+export interface TrendPoint {
+  bucketId: string;
+  label: string;
+  units: number;
+  rank: number | null;
+}
+
+export interface PopularityTrend {
+  menuItemId: string;
+  name: string;
+  points: TrendPoint[];
+  latestUnits: number;
+  previousUnits: number;
+  /** Change in units from the previous bucket to the latest, as a percentage. */
+  changePct: number | null;
+  /** Positive means the item climbed the table. Null when it is new. */
+  rankDelta: number | null;
+}
+
+/**
+ * How each product's popularity moves from one session to the next.
+ *
+ * Bucketed by session rather than by calendar, because this business trades on
+ * event days: two markets a fortnight apart are consecutive services, and a
+ * weekly chart of them is mostly zeroes with two spikes in it.
+ *
+ * Rank is tracked alongside units because volume varies with footfall. An item
+ * selling half as much at a quiet market has not fallen out of favour; one that
+ * slid from second place to eighth has.
+ */
+export function popularityTrend(
+  orders: Order[],
+  menuItems: MenuItem[],
+  buckets: { id: string; label: string; sessionIds: string[] }[],
+  limit = 8,
+): PopularityTrend[] {
+  const names = new Map(menuItems.map(m => [m.id, m.name]));
+  const perBucket: Map<string, number>[] = [];
+
+  for (const bucket of buckets) {
+    const ids = new Set(bucket.sessionIds);
+    const units = new Map<string, number>();
+    for (const order of orders) {
+      if (order.voidedAt || !order.sessionId || !ids.has(order.sessionId)) continue;
+      for (const item of order.items) {
+        const isDeal = Boolean(item.dealItems?.length);
+        if (!isDeal) {
+          units.set(item.menuItemId, (units.get(item.menuItemId) ?? 0) + item.quantity);
+          continue;
+        }
+        // A deal's units belong to what it is made of — "how many burgers went
+        // out" has to include the ones inside deals.
+        for (const component of item.dealItems!) {
+          const sub = resolveDealComponent(component, menuItems);
+          if (!sub) continue;
+          units.set(sub.id, (units.get(sub.id) ?? 0) + component.quantity * item.quantity);
+        }
+      }
+    }
+    perBucket.push(units);
+  }
+
+  const ranks = perBucket.map(units => {
+    const order = [...units.entries()].sort((a, b) => b[1] - a[1]);
+    return new Map(order.map(([id], index) => [id, index + 1]));
+  });
+
+  const allIds = new Set<string>();
+  perBucket.forEach(units => units.forEach((_, id) => allIds.add(id)));
+
+  const rows: PopularityTrend[] = [...allIds].map(id => {
+    const points: TrendPoint[] = buckets.map((bucket, index) => ({
+      bucketId: bucket.id,
+      label: bucket.label,
+      units: perBucket[index].get(id) ?? 0,
+      rank: ranks[index].get(id) ?? null,
+    }));
+    const latest = points[points.length - 1];
+    const previous = points.length > 1 ? points[points.length - 2] : undefined;
+    const latestRank = latest?.rank ?? null;
+    const previousRank = previous?.rank ?? null;
+
+    return {
+      menuItemId: id,
+      name: names.get(id) ?? id,
+      points,
+      latestUnits: latest?.units ?? 0,
+      previousUnits: previous?.units ?? 0,
+      changePct: previous && previous.units > 0
+        ? (((latest?.units ?? 0) - previous.units) / previous.units) * 100
+        : null,
+      // A smaller rank number is a better position, so the sign is flipped to
+      // make "positive means climbing" true.
+      rankDelta: latestRank !== null && previousRank !== null ? previousRank - latestRank : null,
+    };
+  });
+
+  return rows
+    .sort((a, b) => b.latestUnits - a.latestUnits || b.previousUnits - a.previousUnits)
+    .slice(0, limit);
+}
+
+/* ---------------------------------------------------------- stock health */
+
+export interface StockoutStats {
+  /** Items that ran to zero at least once in the period. */
+  itemsOut: number;
+  /** Items that moved at all, and so could have run out. */
+  itemsTracked: number;
+  /** Items out ÷ items tracked, as a percentage. */
+  ratePct: number;
+  /** Distinct times an item crossed to zero. */
+  occasions: number;
+  /** Sales the stock on hand could not support. */
+  oversoldUnits: number;
+  worst: { stockItemId: string; name: string; occasions: number }[];
+}
+
+/**
+ * How often the kitchen ran out.
+ *
+ * Two independent measures, because they miss different things. Crossings to
+ * zero come from the stock ledger and catch every run-out, including the ones
+ * nobody tried to sell through. Oversells are recorded at the till and catch
+ * demand that arrived anyway — the more expensive half, and the half that
+ * inferring stockouts from flat sales curves never sees.
+ */
+export function stockoutStats(
+  movements: StockMovement[],
+  stockItems: StockItem[],
+  oversells: OversellEvent[],
+  range: DateRange,
+): StockoutStats {
+  const names = new Map(stockItems.map(s => [s.id, s.name]));
+  const lastLevel = new Map<string, number>();
+  const crossings = new Map<string, number>();
+  const tracked = new Set<string>();
+
+  // Replay in order: only a transition from positive to zero is a stockout.
+  // Counting every line that sits at zero would report one run-out as a dozen.
+  for (const m of [...movements].sort((a, b) => a.timestamp - b.timestamp)) {
+    const previous = lastLevel.get(m.stockItemId);
+    lastLevel.set(m.stockItemId, m.resulting);
+    if (m.timestamp < range.start || m.timestamp >= range.end) continue;
+    tracked.add(m.stockItemId);
+    if (m.resulting <= 0 && (previous === undefined || previous > 0)) {
+      crossings.set(m.stockItemId, (crossings.get(m.stockItemId) ?? 0) + 1);
+    }
+  }
+
+  const oversoldUnits = oversells
+    .filter(e => e.timestamp >= range.start && e.timestamp < range.end)
+    .reduce((sum, e) => sum + e.quantity, 0);
+
+  const worst = [...crossings.entries()]
+    .map(([stockItemId, occasions]) => ({
+      stockItemId,
+      name: names.get(stockItemId) ?? stockItemId,
+      occasions,
+    }))
+    .sort((a, b) => b.occasions - a.occasions)
+    .slice(0, 5);
+
+  return {
+    itemsOut: crossings.size,
+    itemsTracked: tracked.size,
+    ratePct: tracked.size > 0 ? (crossings.size / tracked.size) * 100 : 0,
+    occasions: [...crossings.values()].reduce((n, v) => n + v, 0),
+    oversoldUnits,
+    worst,
+  };
+}
+
+/**
+ * `YYYY-MM-DD` in local time, matching how snapshots are written.
+ *
+ * Snapshots are whole-day facts, so they are compared by day rather than by
+ * instant. Turning a date into a midnight timestamp and testing it against a
+ * range that starts at nine in the morning is false precision: it drops the
+ * very snapshot that describes the morning's opening stock.
+ */
+function localDateKey(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+export interface TurnoverStats {
+  /** Cost of goods sold in the period. */
+  cogs: number;
+  /** Mean inventory value across the period's daily snapshots. */
+  averageInventory: number | null;
+  /** COGS ÷ average inventory. Times the shelf emptied and refilled. */
+  turns: number | null;
+  /** How long the stock on hand lasts at this rate. */
+  daysOfStock: number | null;
+  blocked?: string;
+}
+
+/**
+ * How fast stock moves.
+ *
+ * Average inventory comes from the daily snapshots rather than from opening and
+ * closing alone: a stall that buys in on Friday and sells out on Sunday has an
+ * opening and closing value that describe neither.
+ */
+export function inventoryTurnover(
+  totals: Totals,
+  snapshots: InventorySnapshot[],
+  stockItems: StockItem[],
+  range: DateRange,
+): TurnoverStats {
+  const firstDay = localDateKey(range.start);
+  const lastDay = localDateKey(Math.max(range.start, range.end - 1));
+  const days = new Map<string, number>();
+  for (const snap of snapshots) {
+    if (snap.date < firstDay || snap.date > lastDay) continue;
+    days.set(snap.date, (days.get(snap.date) ?? 0) + snap.value);
+  }
+
+  // No snapshot in the window is normal for a short scope; fall back to the
+  // level on hand, which is at least a measurement of something real.
+  const values = [...days.values()];
+  const current = inventoryValue(stockItems).total;
+  const averageInventory = values.length > 0
+    ? values.reduce((a, b) => a + b, 0) / values.length
+    : (current > 0 ? current : null);
+
+  if (totals.cogs <= 0) {
+    return { cogs: totals.cogs, averageInventory, turns: null, daysOfStock: null, blocked: 'Needs costed sales' };
+  }
+  if (!averageInventory || averageInventory <= 0) {
+    return { cogs: totals.cogs, averageInventory, turns: null, daysOfStock: null, blocked: 'Needs stock values' };
+  }
+
+  const turns = totals.cogs / averageInventory;
+  const spanDays = Math.max(1, (range.end - range.start) / DAY);
+  return {
+    cogs: totals.cogs,
+    averageInventory,
+    turns,
+    daysOfStock: turns > 0 ? spanDays / turns : null,
+  };
+}
+
+export interface DeadStockItem {
+  stockItem: StockItem;
+  /** Last time this item was consumed by a sale. Null if it never has been. */
+  lastSoldAt: number | null;
+  /** First time it appears in the ledger — how long we have known about it. */
+  knownSince: number | null;
+  idleDays: number | null;
+  value: number;
+}
+
+/**
+ * Stock that is not moving.
+ *
+ * Idleness is measured from the last sale, or from the day the item was first
+ * logged if it has never sold at all — which is the worse case, and would be
+ * invisible if items with no sales were skipped for having no date to measure
+ * from.
+ */
+export function deadStock(
+  stockItems: StockItem[],
+  movements: StockMovement[],
+  now = Date.now(),
+  limit = 2,
+): DeadStockItem[] {
+  const lastSold = new Map<string, number>();
+  const firstSeen = new Map<string, number>();
+
+  for (const m of movements) {
+    if (!firstSeen.has(m.stockItemId) || m.timestamp < firstSeen.get(m.stockItemId)!) {
+      firstSeen.set(m.stockItemId, m.timestamp);
+    }
+    if (m.reason !== 'sold') continue;
+    if (!lastSold.has(m.stockItemId) || m.timestamp > lastSold.get(m.stockItemId)!) {
+      lastSold.set(m.stockItemId, m.timestamp);
+    }
+  }
+
+  return stockItems
+    .map(stockItem => {
+      const lastSoldAt = lastSold.get(stockItem.id) ?? null;
+      const knownSince = firstSeen.get(stockItem.id) ?? null;
+      const since = lastSoldAt ?? knownSince;
+      return {
+        stockItem,
+        lastSoldAt,
+        knownSince,
+        idleDays: since === null ? null : Math.max(0, (now - since) / DAY),
+        value: stockItem.quantity * (stockItem.costPerUnit || 0),
+      };
+    })
+    // Items with no ledger history at all are not dead stock, only unused
+    // records — there is no evidence either way, and guessing would fill the
+    // panel with rows nobody recognises.
+    .filter(row => row.idleDays !== null)
+    .sort((a, b) => (b.idleDays ?? 0) - (a.idleDays ?? 0))
+    .slice(0, limit);
+}
+
+/* --------------------------------------------------------------- food cost */
+
+/**
+ * Where the closing stock figure came from.
+ *
+ * `ledger` is what the recipes and receipts imply is left. It is available
+ * immediately and costs nobody a minute of their evening, but it can only ever
+ * surface losses somebody already wrote down.
+ *
+ * `counted` is what was actually on the shelf. The moment a stock take runs,
+ * its correcting movement flows into the same ledger and the figure below
+ * stops being an estimate and starts being a measurement — with no change to
+ * the arithmetic, only to how much it is worth trusting.
+ */
+export type FoodCostBasis = 'counted' | 'ledger';
+
+export interface FoodCost {
+  /** What the recipes say the period's sales should have consumed. */
+  theoretical: number;
+  /** What the stock actually did: opening + purchases − closing. */
+  actual: number | null;
+  /** Actual − theoretical. Positive means more went out than was sold. */
+  variance: number | null;
+  /** Theoretical as a share of net revenue. */
+  theoreticalPct: number | null;
+  actualPct: number | null;
+  openingValue: number | null;
+  closingValue: number | null;
+  purchases: number;
+  basis: FoodCostBasis;
+  /** When stock was last counted inside the period, if it was. */
+  countedAt: number | null;
+  /** Convenience mirror of `basis === 'counted'`. */
+  counted: boolean;
+  blocked?: string;
+}
+
+/**
+ * Stock levels as at a moment, replayed from the ledger.
+ *
+ * Every movement records the level it left behind, so the most recent line at
+ * or before the mark *is* the level — no accumulation, and no drift from
+ * summing deltas that were rounded when they were written.
+ *
+ * An item whose ledger starts after the mark is handled from the other side:
+ * its first movement's `resulting − delta` is exactly the level it started
+ * from, which is the level at the mark. Treating it as zero instead would make
+ * every stock item look as though it appeared out of nowhere.
+ */
+function ledgerLevelsAt(movements: StockMovement[], at: number): Map<string, number> {
+  const levels = new Map<string, number>();
+  const resolved = new Set<string>();
+
+  for (const m of [...movements].sort((a, b) => a.timestamp - b.timestamp)) {
+    if (m.timestamp <= at) {
+      levels.set(m.stockItemId, m.resulting);
+      resolved.add(m.stockItemId);
+    } else if (!resolved.has(m.stockItemId)) {
+      levels.set(m.stockItemId, m.resulting - m.delta);
+      resolved.add(m.stockItemId);
+    }
+  }
+  return levels;
+}
+
+/**
+ * Value of the stock on hand at a moment, from the ledger.
+ *
+ * Valued at today's cost per unit, as every other stock figure in the app is.
+ * Historical unit costs are recorded on receipts and could be used instead, but
+ * mixing them in would mean this number and the inventory value on the same
+ * screen disagreed about what a kilo of mince is worth.
+ */
+function ledgerValueAt(movements: StockMovement[], stockItems: StockItem[], at: number): number {
+  const levels = ledgerLevelsAt(movements, at);
+  return stockItems.reduce(
+    (sum, item) => sum + Math.max(0, levels.get(item.id) ?? 0) * (item.costPerUnit || 0), 0);
+}
+
+/** Total value of the latest snapshot on or before `at`'s day. Null when none exists. */
+function snapshotValueAt(snapshots: InventorySnapshot[], at: number): number | null {
+  const cutoff = localDateKey(at);
+  const byDate = new Map<string, number>();
+  for (const snap of snapshots) {
+    if (snap.date > cutoff) continue;
+    byDate.set(snap.date, (byDate.get(snap.date) ?? 0) + snap.value);
+  }
+  if (byDate.size === 0) return null;
+  const latest = [...byDate.keys()].sort().pop()!;
+  return byDate.get(latest) ?? null;
+}
+
+/**
+ * Theoretical against actual ingredient cost, and the gap between them.
+ *
+ * Theoretical is the sum of the cost snapshots frozen onto each sold line — what
+ * the recipes say went out. Actual is what the stock did: opening value, plus
+ * everything received, less closing value.
+ *
+ * The gap is where the money goes missing: waste, over-portioning, theft, and
+ * deliveries that came in dearer than the last one. It is only as honest as the
+ * closing figure, so `counted` says whether a real count backs it.
+ */
+export function foodCost(
+  totals: Totals,
+  movements: StockMovement[],
+  snapshots: InventorySnapshot[],
+  stockItems: StockItem[],
+  range: DateRange,
+  now = Date.now(),
+): FoodCost {
+  const theoretical = totals.cogs;
+  const theoreticalPct = totals.netRevenue > 0 ? (theoretical / totals.netRevenue) * 100 : null;
+
+  let purchases = 0;
+  let countedAt: number | null = null;
+  for (const m of movements) {
+    if (m.timestamp < range.start || m.timestamp >= range.end) continue;
+    if (m.reason === 'stocktake' && (countedAt === null || m.timestamp > countedAt)) {
+      countedAt = m.timestamp;
+    }
+    if (m.delta <= 0 || m.reversed) continue;
+    if (m.reason !== 'added' && m.reason !== 'packet' && m.reason !== 'correction') continue;
+    const unit = m.unitCost ?? stockItems.find(s => s.id === m.stockItemId)?.costPerUnit ?? 0;
+    purchases += m.totalCost ?? unit * m.delta;
+  }
+
+  const hasLedger = movements.length > 0;
+
+  /*
+   * Both ends come from the ledger first and snapshots only as a fallback.
+   *
+   * A snapshot is written once a day, at the first launch, so it describes the
+   * shelf at breakfast. Asking it what a session that ran from noon to eight
+   * closed on gets an answer a whole trading day stale. Replaying the ledger to
+   * an instant is exact, and every movement already records the level it left
+   * behind, so there is nothing to accumulate and nothing to drift.
+   *
+   * The ledger answers even for a window that opens before its first line: that
+   * line's `resulting − delta` is the level it stepped away from, which is the
+   * level throughout everything earlier. That is a real measurement of stock
+   * whose arrival was never recorded — strictly better than assuming an empty
+   * shelf, and it is what lets "All time" report an actual cost at all.
+   */
+  const openingValue = hasLedger
+    ? ledgerValueAt(movements, stockItems, range.start)
+    : snapshotValueAt(snapshots, range.start);
+
+  const closingValue = range.end > now
+    // A period running up to now closes on the shelf itself, which already
+    // includes any count that has been done.
+    ? inventoryValue(stockItems).total
+    : hasLedger
+      ? ledgerValueAt(movements, stockItems, range.end - 1)
+      : snapshotValueAt(snapshots, range.end);
+
+  // A stock take writes a correcting movement, so once one runs its result is
+  // already inside the closing figure above. Nothing here changes when stock is
+  // counted except how much the answer can be trusted — which is the whole
+  // point of saying which basis it came from.
+  const basis: FoodCostBasis = countedAt !== null ? 'counted' : 'ledger';
+
+  if (openingValue === null || closingValue === null) {
+    return {
+      theoretical,
+      actual: null,
+      variance: null,
+      theoreticalPct,
+      actualPct: null,
+      openingValue,
+      closingValue,
+      purchases,
+      basis,
+      countedAt,
+      counted: basis === 'counted',
+      blocked: 'No stock history reaches back this far',
+    };
+  }
+
+  const actual = openingValue + purchases - closingValue;
+  return {
+    theoretical,
+    actual,
+    variance: actual - theoretical,
+    theoreticalPct,
+    actualPct: totals.netRevenue > 0 ? (actual / totals.netRevenue) * 100 : null,
+    openingValue,
+    closingValue,
+    purchases,
+    basis,
+    countedAt,
+    counted: basis === 'counted',
+  };
+}
+
+/* --------------------------------------------------------- data quality */
+
+export interface DataQualityIssue {
+  id: string;
+  severity: 'warn' | 'info';
+  message: string;
+  count: number;
+}
+
+/**
+ * What analytics cannot currently answer, and why.
+ *
+ * Shown rather than hidden: a margin computed from 40% cost coverage is worse
+ * than no margin at all, because it looks like an answer.
+ */
+export function dataQuality(
+  orders: Order[],
+  stockItems: StockItem[],
+  assignments: MenuItemStockAssignment[],
+  menuItems: MenuItem[],
+  range: DateRange,
+  food?: FoodCost,
+): DataQualityIssue[] {
+  const issues: DataQualityIssue[] = [];
+  const live = orders.filter(o => !o.voidedAt && inRange(o, range));
+
+  // Not a warning — an estimated food cost is a perfectly usable number, and
+  // demanding a count at the end of a market day is how cost tracking gets
+  // abandoned. It just must not be mistaken for a measurement.
+  if (food && food.actual !== null && food.basis === 'ledger') {
+    issues.push({
+      id: 'food-cost-estimated',
+      severity: 'info',
+      count: 1,
+      message: 'The actual food cost here is an estimate: nothing was counted in this period, so it only accounts for waste and corrections you already wrote down. Do a stock take and it becomes a real measurement.',
+    });
+  }
+
+  const uncostedLines = live.reduce(
+    (n, o) => n + o.items.filter((i: CartItem) => i.unitCost === undefined).length, 0);
+  const allLines = live.reduce((n, o) => n + o.items.length, 0);
+  if (uncostedLines > 0) {
+    issues.push({
+      id: 'uncosted-lines',
+      severity: 'warn',
+      count: uncostedLines,
+      message: `${Math.round((uncostedLines / Math.max(1, allLines)) * 100)}% of what you sold has no cost recorded against it, so the profit figures only cover the rest. Assign stock to your menu items to close the gap.`,
+    });
+  }
+
+  const noCost = stockItems.filter(s => !(s.costPerUnit > 0));
+  if (noCost.length > 0) {
+    issues.push({
+      id: 'uncosted-stock',
+      severity: 'warn',
+      count: noCost.length,
+      message: `${noCost.length} thing${noCost.length === 1 ? ' on the shelf has' : 's on the shelf have'} no cost recorded: ${noCost.slice(0, 3).map(s => s.name).join(', ')}${noCost.length > 3 ? '…' : ''}. Type in what a delivery cost when you add stock and this fills itself in.`,
+    });
+  }
+
+  const unassigned = menuItems.filter(m =>
+    m.showInOrderMode && !m.dealItems?.length && !assignments.some(a => a.menuItemId === m.id));
+  if (unassigned.length > 0) {
+    issues.push({
+      id: 'unassigned-items',
+      severity: 'info',
+      count: unassigned.length,
+      message: `${unassigned.length} menu item${unassigned.length === 1 ? ' has' : 's have'} nothing assigned to ${unassigned.length === 1 ? 'it' : 'them'}, so selling ${unassigned.length === 1 ? 'it takes' : 'them takes'} nothing off the shelf and ${unassigned.length === 1 ? 'it' : 'they'} cannot be costed. Set that up under Inventory → Assign Stock.`,
+    });
+  }
+
+  const untimed = live.filter(o => !o.readyAt && !o.completedAt).length;
+  if (untimed > 0 && untimed === live.length) {
+    issues.push({
+      id: 'no-stage-times',
+      severity: 'info',
+      count: untimed,
+      message: 'No ticket in this period was moved through the board with timings recorded, so there are no kitchen times to show. They start being recorded from now on and cannot be filled in for the past.',
+    });
+  }
+
+  return issues;
+}

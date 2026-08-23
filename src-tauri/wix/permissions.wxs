@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Fragment>
+        <DirectoryRef Id="INSTALLDIR">
+            <Directory Id="DataDir" Name="data">
+                <Component Id="DataDirComponent" Guid="81A7B3F2-4E5D-4C6F-8A9B-1C2D3E4F5A6B" Permanent="yes">
+                    <CreateFolder>
+                        <Permission User="Everyone" GenericAll="yes" />
+                    </CreateFolder>
+                    <RemoveFolder Id="RemoveDataDir" On="uninstall" />
+                    <RegistryValue Root="HKCU" Key="Software\hotdads\Hot Dads POS" Name="DataDir" Type="string" Value="[DataDir]" KeyPath="yes" />
+                </Component>
+            </Directory>
+        </DirectoryRef>
+
+        <ComponentGroup Id="WritableDataDir">
+            <ComponentRef Id="DataDirComponent" />
+        </ComponentGroup>
+    </Fragment>
+</Wix>

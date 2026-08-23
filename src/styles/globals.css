@@ -1,0 +1,80 @@
+
+@font-face {
+font-display: auto;
+font-family: 'D7CBI';
+font-style: italic;
+font-weight: 400;
+font-stretch: normal;
+unicode-range: U+0-10FFFF;
+src: url('https://storage.googleapis.com/download/storage/v1/b/prd-storytodesign.appspot.com/o/h2d-ext-asset%2F52321fba1c682eb4ed7ad6d8a4a2660dc5c58b8c?generation=1760098973783340&alt=media') format('woff2');
+}
+
+@font-face {
+font-display: auto;
+font-family: 'Figma Sans';
+font-style: normal;
+font-weight: 300;
+font-stretch: normal;
+unicode-range: U+0-10FFFF;
+src: url('https://storage.googleapis.com/download/storage/v1/b/prd-storytodesign.appspot.com/o/h2d-ext-asset%2F827b2f22f725a78df65ac518da8dc53e6a9e2026?generation=1760087771672831&alt=media') format('woff2');
+}
+
+@font-face {
+font-display: auto;
+font-family: 'Figma Sans';
+font-style: normal;
+font-weight: 400;
+font-stretch: normal;
+unicode-range: U+0-10FFFF;
+src: url('https://storage.googleapis.com/download/storage/v1/b/prd-storytodesign.appspot.com/o/h2d-ext-asset%2F2c67263c987972091a7b57b40ce5f4e08ac15ef6?generation=1760091310541522&alt=media') format('woff2');
+}
+
+@font-face {
+font-display: auto;
+font-family: 'Figma Sans';
+font-style: normal;
+font-weight: 500;
+font-stretch: normal;
+unicode-range: U+0-10FFFF;
+src: url('https://storage.googleapis.com/download/storage/v1/b/prd-storytodesign.appspot.com/o/h2d-ext-asset%2F2396888b04dbfaf48628cbc3a042e19379430f37?generation=1760087771659014&alt=media') format('woff2');
+}
+
+@font-face {
+font-display: auto;
+font-family: 'Figma Mono';
+font-style: normal;
+font-weight: 400;
+font-stretch: normal;
+unicode-range: U+0-10FFFF;
+src: url('https://storage.googleapis.com/download/storage/v1/b/prd-storytodesign.appspot.com/o/h2d-ext-asset%2F4c212782182fb0c42db59ce089a899e3a8349f11?generation=1760087771679229&alt=media') format('woff2');
+}
+
+@font-face {
+font-display: auto;
+font-family: 'Figma Mono';
+font-style: normal;
+font-weight: 700;
+font-stretch: normal;
+unicode-range: U+0-10FFFF;
+src: url('https://storage.googleapis.com/download/storage/v1/b/prd-storytodesign.appspot.com/o/h2d-ext-asset%2Fc5c264c998ba8cbf4c920929a916dd2c0c3c00ec?generation=1760030469842683&alt=media') format('woff2');
+}
+
+@font-face {
+font-display: auto;
+font-family: 'Inter';
+font-style: normal;
+font-weight: 100 900;
+font-stretch: normal;
+unicode-range: U+0-10FFFF;
+src: url('https://storage.googleapis.com/download/storage/v1/b/prd-storytodesign.appspot.com/o/h2d-ext-asset%2F2cca21a49f7dad1daa612d73d50357644671964a?generation=1760098973785518&alt=media') format('woff2');
+}
+
+@font-face {
+font-display: auto;
+font-family: 'Inter';
+font-style: italic;
+font-weight: 100 900;
+font-stretch: normal;
+unicode-range: U+0-10FFFF;
+src: url('https://storage.googleapis.com/download/storage/v1/b/prd-storytodesign.appspot.com/o/h2d-ext-asset%2F43d730c59dee2754d29e0d946ba8cb8339656979?generation=1760098973749336&alt=media') format('woff2');
+}
