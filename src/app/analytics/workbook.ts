@@ -332,11 +332,18 @@ export function buildSummaryWorkbook(input: WorkbookInput): Uint8Array {
     { Metric: 'Void rate % by count', Value: round2(voids.byCountPct), Definition: 'Tickets cancelled after being rung up ÷ all tickets' },
     { Metric: 'Void rate % by value', Value: round2(voids.byValuePct), Definition: 'Cancelled value ÷ cancelled plus live value' },
     { Metric: 'Voided value', Value: round2(voids.voidedValue), Definition: 'Revenue that was rung up and then cancelled' },
-    { Metric: 'Fixed costs logged', Value: round2(costs.fixed), Definition: 'Costs that do not move with volume' },
-    { Metric: 'Variable costs logged', Value: round2(costs.variable), Definition: 'Costs that rise with every unit sold' },
-    { Metric: 'Contribution margin %', Value: be.contributionRatio === null ? '' : round2(be.contributionRatio * 100), Definition: 'Share of each rupee left after ingredients and variable costs' },
-    { Metric: 'Break-even revenue', Value: be.revenue === null ? '' : round2(be.revenue), Definition: be.blocked ?? 'Fixed costs ÷ contribution margin' },
-    { Metric: 'Break-even units', Value: be.units === null ? '' : Math.ceil(be.units), Definition: be.blocked ?? 'Fixed costs ÷ contribution per unit' },
+    // One row per basis, and nothing totalling across them: Rs 4 a ticket and
+    // 18% of sales are not addable, and a spreadsheet is exactly where somebody
+    // would add them (ADR-012).
+    { Metric: 'Per-session costs logged', Value: round2(costs.byBasis['per-session']), Definition: 'Rupees paid once per service — pitch fee, a staff shift' },
+    { Metric: 'Per-event costs logged', Value: round2(costs.byBasis['per-event']), Definition: 'Rupees paid once for the whole event' },
+    { Metric: 'Per-order costs logged', Value: round2(costs.byBasis['per-order']), Definition: 'Rupees charged on every ticket — bags, receipt roll' },
+    { Metric: 'Per-unit costs logged', Value: round2(costs.byBasis['per-unit']), Definition: 'Rupees charged on every item sold' },
+    { Metric: 'Per-revenue costs logged', Value: round2(costs.byBasis['per-revenue']), Definition: 'Percentage points of sales — commission, card fees' },
+    { Metric: 'Committed costs', Value: round2(be.fixedCosts), Definition: 'Per-session plus per-event: the rupees this period owes whatever sells' },
+    { Metric: 'Contribution margin %', Value: be.contributionRatio === null ? '' : round2(be.contributionRatio * 100), Definition: 'Share of each rupee left after ingredients and every cost that scales with a sale' },
+    { Metric: 'Break-even revenue', Value: be.revenue === null ? '' : round2(be.revenue), Definition: be.blocked ?? 'Committed costs ÷ contribution margin' },
+    { Metric: 'Break-even units', Value: be.units === null ? '' : Math.ceil(be.units), Definition: be.blocked ?? 'Committed costs ÷ contribution per unit' },
     { Metric: 'Food cost (theoretical)', Value: round2(food.theoretical), Definition: 'What the recipes say the sold lines consumed' },
     { Metric: 'Food cost % (theoretical)', Value: food.theoreticalPct === null ? '' : round2(food.theoreticalPct), Definition: 'Theoretical ingredient cost ÷ net revenue' },
     { Metric: 'Food cost (actual)', Value: food.actual === null ? '' : round2(food.actual), Definition: food.blocked ?? 'Opening stock + purchases − closing stock, both replayed from the ledger' },

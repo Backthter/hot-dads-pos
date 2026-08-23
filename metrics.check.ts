@@ -6,8 +6,8 @@
  * something to fail against. Run with `npx tsx metrics.check.ts`.
  */
 import {
-  attachmentPairs, breakEven, costSummary, deadStock, foodCost, inventoryTurnover,
-  queueBands, resolveRange, stockoutStats, totalsFor, voidStats,
+  BREAK_EVEN_BLOCKED, attachmentPairs, breakEven, costSummary, deadStock, foodCost,
+  inventoryTurnover, queueBands, resolveRange, stockoutStats, totalsFor, voidStats,
 } from './src/app/analytics/metrics';
 import {
   costEntryIsCoherent, costsForEvent, endSession, needsRefiling, pauseSession, resumeSession,
@@ -22,7 +22,7 @@ import {
 } from './src/app/analytics/search';
 import type { CostSummary } from './src/app/analytics/metrics';
 import type {
-  CostEntry, InventorySnapshot, Order, OversellEvent, StockItem, StockMovement,
+  CostBasis, CostEntry, InventorySnapshot, Order, OversellEvent, StockItem, StockMovement,
 } from './src/app/types';
 
 let failures = 0;
@@ -50,55 +50,127 @@ function order(over: Partial<Order>): Order {
 }
 const line = (id: string, name: string, qty: number, price: number, unitCost?: number) =>
   ({ menuItemId: id, name, quantity: qty, price, unitCost });
+const cost = (over: Partial<CostEntry>): CostEntry => ({
+  id: 'c', amount: 0, note: '', basis: 'per-session', timestamp: T, ...over,
+});
 
 /* ------------------------------------------------------------- break-even */
-// 10 units at Rs 100 with a Rs 40 ingredient cost: revenue 1000, COGS 400.
-// Gross ratio 0.6; variable costs of 200 are 0.2 of revenue; contribution 0.4.
-// Break-even revenue = 1000 / 0.4 = 2500. Contribution per unit = 100 × 0.4 = 40,
-// so break-even units = 1000 / 40 = 25.
+// Two tickets of 5 burgers at Rs 100 with a Rs 40 ingredient cost each:
+// revenue 1000, COGS 400, 10 units, a basket of 5, an average price of 100.
 //
-// The summary is written by hand rather than taken from `costSummary`, which
-// since Phase 1A returns `variable: 0` always — a basis that scales is a rate,
-// and resolving a rate to rupees needs the period's tickets, units and revenue.
-// Pairing the two up again is 1A-ii's work. Until then these cases pin
-// `breakEven`'s own arithmetic, which is unchanged and has to stay that way
-// while the model around it moves.
+// Every case below sets exactly one basis against a Rs 1,000 per-session cost,
+// so a rate leaking into the wrong denominator shows up as a wrong figure
+// rather than a right one reached by accident.
 console.log('\nBreak-even');
-const beOrders = [order({ items: [line('a', 'Burger', 10, 100, 40)], subtotal: 1000, total: 1000 })];
+const beOrders = [
+  order({ id: 'be1', items: [line('a', 'Burger', 5, 100, 40)], subtotal: 500, total: 500 }),
+  order({ id: 'be2', items: [line('a', 'Burger', 5, 100, 40)], subtotal: 500, total: 500 }),
+];
 const beTotals = totalsFor(beOrders);
-const summary = (fixed: number, variable: number): CostSummary => ({
-  byBasis: {
-    'per-session': fixed, 'per-event': 0, 'per-order': 0, 'per-unit': 0, 'per-revenue': 0,
-  },
-  total: fixed,
-  entries: 2,
-  fixed,
-  variable,
-});
-const be = breakEven(beTotals, summary(1000, 200));
-check('contribution ratio', be.contributionRatio, 0.4);
-check('contribution per unit', be.contributionPerUnit, 40);
-check('break-even revenue', be.revenue, 2500);
-check('break-even units', be.units, 25);
-check('progress towards it', be.progress, 0.4);
+const costsOf = (over: Partial<Record<CostBasis, number>>): CostSummary => costSummary(
+  (Object.entries(over) as [CostBasis, number][])
+    .map(([basis, amount], i) => cost({
+      id: `k${i}`, amount, basis, eventId: basis === 'per-event' ? 'e1' : undefined,
+    })),
+);
 
-// Nothing logged is not the same as breaking even at zero.
+// Per-session alone. 100 − 40 = 60 left on each, so 0.6 of every rupee, and
+// 1000 ÷ 0.6 = 1666.67 to take.
+const beSession = breakEven(beTotals, costsOf({ 'per-session': 1000 }));
+check('per-session · contribution per unit', beSession.contributionPerUnit, 60);
+check('per-session · contribution ratio', beSession.contributionRatio, 0.6);
+check('per-session · break-even revenue', beSession.revenue, 1000 / 0.6);
+check('per-session · break-even units', beSession.units, 1000 / 60);
+check('per-session · progress', beSession.progress, 1000 / (1000 / 0.6));
+
+// Per-unit is charged on every item: Rs 10 an item takes contribution to 50.
+const beUnit = breakEven(beTotals, costsOf({ 'per-session': 1000, 'per-unit': 10 }));
+check('per-unit · contribution per unit', beUnit.contributionPerUnit, 50);
+check('per-unit · break-even revenue', beUnit.revenue, 2000);
+check('per-unit · break-even units', beUnit.units, 20);
+
+// Per-order is charged on every ticket, and a ticket here is 5 units: Rs 20 a
+// ticket is Rs 4 an item. This is the one that has a denominator of its own.
+const beOrder = breakEven(beTotals, costsOf({ 'per-session': 1000, 'per-order': 20 }));
+check('per-order · basket size', beOrder.averageBasket, 5);
+check('per-order · contribution per unit', beOrder.contributionPerUnit, 56);
+check('per-order · break-even revenue', beOrder.revenue, 1000 / 0.56);
+
+// Per-revenue is a true rate: 20% of a Rs 100 sale is Rs 20, leaving 40.
+const beRate = breakEven(beTotals, costsOf({ 'per-session': 1000, 'per-revenue': 20 }));
+check('per-revenue · rate is a fraction', beRate.revenueRate, 0.2);
+check('per-revenue · contribution per unit', beRate.contributionPerUnit, 40);
+check('per-revenue · break-even revenue', beRate.revenue, 2500);
+
+// Per-event joins the committed rupees in a date or event scope...
+const beEvent = breakEven(beTotals, costsOf({ 'per-session': 1000, 'per-event': 500 }), 'event');
+check('per-event · committed rupees', beEvent.fixedCosts, 1500);
+check('per-event · break-even revenue', beEvent.revenue, 1500 / 0.6);
+check('per-event · nothing held back', beEvent.heldEventCosts, 0);
+
+// ...and is held back from a single session out of that event (ADR-013).
+// Apportioning it would make this session's target move when a later session
+// trades well, which is the moving target this whole part exists to remove.
+const beInSession = breakEven(beTotals, costsOf({ 'per-session': 1000, 'per-event': 500 }), 'session');
+check('a session is not charged the event', beInSession.fixedCosts, 1000);
+check('and is told what the event carries', beInSession.heldEventCosts, 500);
+check('so its target is the session alone', beInSession.revenue, 1000 / 0.6);
+
+/* ------------------------- the property that was broken: the target holds still */
+// This is the regression that matters. The old formula divided the typed rupee
+// total of the variable costs by revenue-so-far and called the answer a rate,
+// so a Rs 1,200 cost was a 30% drag at Rs 4,000 of sales and a 6% drag at
+// Rs 20,000 — one break-even figure in the morning and another in the
+// afternoon, on identical facts, drifting in the flattering direction.
+//
+// Same mix, same prices, same costs; only the volume differs. The target must
+// not move by a rupee.
+console.log('\nBreak-even does not move with volume');
+const ticket = (id: string) =>
+  order({ id, items: [line('a', 'Burger', 5, 100, 40)], subtotal: 500, total: 500 });
+const heldCosts = costsOf({ 'per-session': 1200, 'per-order': 20, 'per-revenue': 20 });
+const atFourThousand = totalsFor(Array.from({ length: 8 }, (_, i) => ticket(`s${i}`)));
+const atTwentyThousand = totalsFor(Array.from({ length: 40 }, (_, i) => ticket(`l${i}`)));
+check('the smaller day took', atFourThousand.netRevenue, 4000);
+check('the larger day took', atTwentyThousand.netRevenue, 20000);
+const beSmall = breakEven(atFourThousand, heldCosts);
+const beLarge = breakEven(atTwentyThousand, heldCosts);
+check('break-even revenue at Rs 4,000', beSmall.revenue, 1200 / 0.36);
+check('break-even revenue at Rs 20,000', beLarge.revenue, 1200 / 0.36);
+check('the target did not move', (beLarge.revenue ?? 0) - (beSmall.revenue ?? 0), 0);
+check('nor did contribution', (beLarge.contributionRatio ?? 0) - (beSmall.contributionRatio ?? 0), 0);
+// Progress is the figure that is *supposed* to move with the day.
+check('progress did move', (beLarge.progress ?? 0) > (beSmall.progress ?? 0), true);
+
+/* ------------------------------------------------- all four blocked reasons */
+// Each is reported rather than papered over with a zero, and each says
+// something different, because they are different problems.
+console.log('\nBreak-even · blocked');
 const noCosts = breakEven(beTotals, costSummary([]));
-check('blocked without fixed costs', noCosts.blocked, 'No fixed costs logged');
+check('nothing logged is not breaking even at zero', noCosts.blocked, BREAK_EVEN_BLOCKED.noFixedCosts);
 check('and reports no revenue figure', noCosts.revenue, null);
 
-// Costs that exceed the margin have no break-even at any volume.
-const drowning = breakEven(beTotals, summary(500, 900));
-check('blocked when margin is negative', drowning.revenue, null);
+const uncosted = totalsFor([order({ items: [line('a', 'Burger', 5, 100)], subtotal: 500 })]);
+check('no costed sales, no contribution',
+  breakEven(uncosted, costsOf({ 'per-session': 1000 })).blocked, BREAK_EVEN_BLOCKED.noCostedSales);
+
+const drowning = breakEven(beTotals, costsOf({ 'per-session': 1000, 'per-unit': 200 }));
+check('costs past the margin never break even', drowning.blocked, BREAK_EVEN_BLOCKED.negativeContribution);
+check('and offer no volume that would', drowning.revenue, null);
+
+// A per-ticket cost with no tickets to spread it over is unanswerable, not
+// enormous: left alone the division is an infinity and the screen would report
+// a margin problem, which is the wrong explanation for a missing denominator.
+const ticketless = breakEven(
+  { ...beTotals, orders: 0 }, costsOf({ 'per-session': 1000, 'per-order': 20 }));
+check('no tickets to spread a per-ticket cost', ticketless.blocked, BREAK_EVEN_BLOCKED.noBasket);
+check('and the basket is unknown, not zero', ticketless.averageBasket, null);
 
 /* ------------------------------------------------------------ cost basis */
 // Each basis totals on its own and touches no other. The amounts are chosen so
 // that any leak between them shows up as a wrong figure rather than a right one
 // reached by accident: 100, 200, 4, 12 and 18 share no sums.
 console.log('\nCost basis');
-const cost = (over: Partial<CostEntry>): CostEntry => ({
-  id: 'c', amount: 0, note: '', basis: 'per-session', timestamp: T, ...over,
-});
 const eachBasis = costSummary([
   cost({ id: 'c1', amount: 100, basis: 'per-session' }),
   cost({ id: 'c2', amount: 200, basis: 'per-event', eventId: 'e1' }),

@@ -542,23 +542,28 @@ export function breakEvenByItem(
   items: ItemPerformance[],
   costs: CostSummary,
   totals: Totals,
+  scope: CostScope = 'range',
 ): ItemBreakEven[] {
-  if (costs.fixed <= 0) return [];
+  const resolved = resolveCosts(costs, totals, scope);
+  if (resolved.fixed <= 0) return [];
 
-  // Variable costs are spread across revenue, because that is the only thing
-  // they are known in proportion to.
-  const variableRatio = totals.netRevenue > 0 ? costs.variable / totals.netRevenue : 0;
+  // Each rate is charged against the volume its own basis names, exactly as in
+  // `breakEven`. A per-ticket cost becomes a per-unit one through the basket.
+  const perOrderPerUnit = resolved.averageBasket && resolved.averageBasket > 0
+    ? resolved.perOrderCost / resolved.averageBasket
+    : 0;
 
   return items
     .filter(item => item.costed && item.units > 0)
     .map(item => {
       const price = item.netRevenue / item.units;
-      const contributionPerUnit = (item.netRevenue - item.cogs) / item.units - price * variableRatio;
+      const contributionPerUnit = (item.netRevenue - item.cogs) / item.units
+        - price * resolved.revenueRate - resolved.perUnitCost - perOrderPerUnit;
       return {
         menuItemId: item.menuItemId,
         name: item.name,
         contributionPerUnit,
-        units: contributionPerUnit > 0 ? costs.fixed / contributionPerUnit : Infinity,
+        units: contributionPerUnit > 0 ? resolved.fixed / contributionPerUnit : Infinity,
         sold: item.units,
       };
     })
@@ -788,22 +793,6 @@ export interface CostSummary {
    */
   total: number;
   entries: number;
-  /**
-   * @deprecated The pre-1A shape, kept only so `breakEven` and
-   * `breakEvenByItem` compile unchanged until 1A-ii replaces them.
-   *
-   * `fixed` is `total` — the rupees committed regardless of volume, which is
-   * what break-even divides by contribution. `variable` is 0 and will stay 0
-   * until 1A-ii: the bases that scale are *rates*, and the old field wanted
-   * rupees, so anything put here would be a rate read as an amount. Zero
-   * understates a stall's per-ticket costs, which is visible and correctable;
-   * a wrong-by-a-factor-of-the-ticket-count figure is neither. Every row that
-   * existed before this phase migrated to `per-session`, so on historical data
-   * the two agree exactly.
-   */
-  fixed: number;
-  /** @deprecated See `fixed`. */
-  variable: number;
 }
 
 const ZERO_BY_BASIS = (): Record<CostBasis, number> => ({
@@ -821,13 +810,107 @@ export function costSummary(costs: CostEntry[]): CostSummary {
   const byBasis = ZERO_BY_BASIS();
   for (const c of costs) byBasis[c.basis] += c.amount;
   const total = byBasis['per-session'] + byBasis['per-event'];
-  return { byBasis, total, entries: costs.length, fixed: total, variable: 0 };
+  return { byBasis, total, entries: costs.length };
 }
 
+/* ------------------------------------------------- resolving a cost to money */
+
+/**
+ * Which kind of period a figure is being taken over.
+ *
+ * The only thing this changes is what happens to a `per-event` cost, and it
+ * changes it for one reason: a session inside an event must not be charged a
+ * share of the event's own costs. See ADR-013.
+ */
+export type CostScope = 'range' | 'event' | 'session';
+
+/**
+ * A period's costs, resolved against that period's own volumes.
+ *
+ * This is the step ADR-012 said belonged here rather than in `costSummary`. An
+ * amount only becomes money once the basis has something to be charged per, and
+ * the period is what supplies it: tickets for `per-order`, units for
+ * `per-unit`, revenue for `per-revenue`.
+ *
+ * Every one of these is a *rate*, taken from the cost entries themselves.
+ * Nothing here is derived by dividing a rupee total by revenue-so-far, which is
+ * the whole of what was wrong before — see ADR-012 and the note on `breakEven`.
+ */
+export interface ResolvedCosts {
+  /** Rupees committed whatever sells, and the numerator of break-even. */
+  fixed: number;
+  /**
+   * `per-event` rupees in scope that this figure deliberately does **not**
+   * spread, because the scope is one session out of an event (ADR-013). Zero in
+   * every other scope, where the event's costs are simply part of `fixed`.
+   */
+  heldEventCosts: number;
+  /** Rupees charged on every item sold, from `per-unit`. Ingredients are separate. */
+  perUnitCost: number;
+  /** Rupees charged on every ticket, from `per-order`. */
+  perOrderCost: number;
+  /** A true fraction of each rupee taken, from `per-revenue`. 0.18, not 18. */
+  revenueRate: number;
+  /**
+   * Units per ticket, which is what turns a per-ticket cost into a per-unit
+   * one. Null when there are no tickets to divide by — and null rather than
+   * zero, because a per-order cost divided by zero is not a large number, it is
+   * an unanswerable question (invariant 2's distinction, one layer up).
+   */
+  averageBasket: number | null;
+}
+
+export function resolveCosts(
+  costs: CostSummary,
+  totals: Totals,
+  scope: CostScope = 'range',
+): ResolvedCosts {
+  const eventCosts = costs.byBasis['per-event'];
+  const allocated = scope !== 'session';
+
+  return {
+    fixed: costs.byBasis['per-session'] + (allocated ? eventCosts : 0),
+    heldEventCosts: allocated ? 0 : eventCosts,
+    perUnitCost: costs.byBasis['per-unit'],
+    perOrderCost: costs.byBasis['per-order'],
+    revenueRate: costs.byBasis['per-revenue'] / 100,
+    averageBasket: totals.orders > 0 ? totals.units / totals.orders : null,
+  };
+}
+
+/**
+ * Why a break-even figure is unavailable.
+ *
+ * Exported because the screen branches on them and `metrics.check.ts` asserts
+ * each one is reachable; a string compared in three places is a string that
+ * eventually gets a comma moved in one of them.
+ */
+export const BREAK_EVEN_BLOCKED = {
+  noCostedSales: 'Needs costed sales',
+  noFixedCosts: 'No fixed costs logged',
+  negativeContribution: 'Costs exceed the margin — no volume breaks even',
+  noBasket: 'Needs a ticket count to spread the per-order costs',
+} as const;
+
 export interface BreakEven {
+  /** Rupees to cover: `per-session` plus, unless held back, `per-event`. */
   fixedCosts: number;
-  variableCosts: number;
-  /** Share of each rupee of revenue left after ingredients and variable costs. */
+  /**
+   * `per-event` rupees in scope that this figure does not cover, because the
+   * scope is one session out of an event. The event carries them (ADR-013).
+   */
+  heldEventCosts: number;
+  /** Net revenue ÷ units. The average thing sold, which is what is priced. */
+  averagePrice: number | null;
+  /** Ingredients plus `per-unit` costs, for one of that average thing. */
+  perUnitCost: number | null;
+  /** `per-order` rupees, charged once a ticket. */
+  perOrderCost: number;
+  /** `per-revenue` costs as a fraction of each rupee taken. */
+  revenueRate: number;
+  /** Units per ticket, which is what spreads `perOrderCost` over units. */
+  averageBasket: number | null;
+  /** Share of each rupee of revenue left after every cost that scales with it. */
   contributionRatio: number | null;
   /** Rupees of contribution per unit sold. */
   contributionPerUnit: number | null;
@@ -842,22 +925,62 @@ export interface BreakEven {
 /**
  * What has to be sold before the day pays for itself.
  *
- * Break-even is fixed costs ÷ contribution margin. Contribution is what a sale
- * leaves behind after the costs that scale with it: ingredients, from the stock
- * ledger, plus anything logged as a variable cost.
+ * Break-even is committed rupees ÷ contribution. Contribution is what one sale
+ * leaves behind after every cost that scales with it, and each of those costs
+ * is resolved against the volume its own basis names:
  *
- * Three things can make this unanswerable, and each is reported rather than
+ * ```
+ * fixed               = Σ per-session + Σ per-event
+ * perUnitCost         = ingredients per unit + Σ per-unit
+ * perOrderCost        = Σ per-order
+ * revenueRate         = Σ per-revenue ÷ 100
+ * contributionPerUnit = price × (1 − revenueRate) − perUnitCost
+ *                                                 − perOrderCost ÷ avgBasket
+ * breakEvenUnits      = fixed ÷ contributionPerUnit
+ * breakEvenRevenue    = fixed ÷ contributionRatio
+ * ```
+ *
+ * **What this replaces, and why it mattered.** The previous version had no
+ * rates to work from — every non-fixed cost was one word, `variable` — so it
+ * manufactured one: it took the typed rupee total of those costs and divided it
+ * by *revenue so far*. That is a circle. At Rs 4,000 of sales a Rs 1,200 fuel
+ * bill is a 30% drag and break-even is unreachable; at Rs 20,000 the same bill
+ * is 6% and break-even has already been passed. The target therefore moved as
+ * the day went on, on identical facts, and moved in the flattering direction. A
+ * number that depends on when you read it is not a target. Every ratio above is
+ * a property of the cost entries and the average sale, so the target holds
+ * still while the day fills up underneath it — which is what
+ * `metrics.check.ts`'s "the target does not move" case exists to hold.
+ *
+ * Ingredient cost per unit is taken over the *costed* lines and then applied to
+ * the average price, rather than dividing total COGS by total units. Dividing
+ * by all units would charge the uncosted ones at zero, which is invariant 2's
+ * exact failure and reports the flattering answer.
+ *
+ * Four things can make this unanswerable, and each is reported rather than
  * papered over with a zero:
  *
+ *  - no costed sales, so contribution cannot be measured at all;
  *  - no fixed costs logged, so there is nothing to break even against;
- *  - no costed sales, so contribution cannot be measured;
- *  - contribution at or below zero, where no volume ever breaks even and the
- *    number would be a meaningless infinity.
+ *  - contribution at or below zero, where no volume ever breaks even;
+ *  - contribution otherwise positive, but no tickets to divide the per-order
+ *    costs by. Left alone that division is an infinity, which would surface as
+ *    "costs exceed the margin" — a wrong explanation for a missing denominator.
  */
-export function breakEven(totals: Totals, costs: CostSummary): BreakEven {
+export function breakEven(
+  totals: Totals,
+  costs: CostSummary,
+  scope: CostScope = 'range',
+): BreakEven {
+  const resolved = resolveCosts(costs, totals, scope);
   const base: BreakEven = {
-    fixedCosts: costs.fixed,
-    variableCosts: costs.variable,
+    fixedCosts: resolved.fixed,
+    heldEventCosts: resolved.heldEventCosts,
+    averagePrice: null,
+    perUnitCost: null,
+    perOrderCost: resolved.perOrderCost,
+    revenueRate: resolved.revenueRate,
+    averageBasket: resolved.averageBasket,
     contributionRatio: null,
     contributionPerUnit: null,
     revenue: null,
@@ -865,42 +988,57 @@ export function breakEven(totals: Totals, costs: CostSummary): BreakEven {
     progress: null,
   };
 
-  if (totals.costedRevenue <= 0) {
-    return { ...base, blocked: 'Needs costed sales' };
+  if (totals.costedRevenue <= 0 || totals.units <= 0) {
+    return { ...base, blocked: BREAK_EVEN_BLOCKED.noCostedSales };
   }
 
-  // Margin is measured over the costed lines, then variable costs are taken off
-  // as a share of all revenue — the only common denominator the two have.
-  const grossRatio = (totals.costedRevenue - totals.cogs) / totals.costedRevenue;
-  const variableRatio = totals.netRevenue > 0 ? costs.variable / totals.netRevenue : 0;
-  const contributionRatio = grossRatio - variableRatio;
-  const averagePrice = totals.units > 0 ? totals.netRevenue / totals.units : 0;
-  const contributionPerUnit = averagePrice * contributionRatio;
+  const averagePrice = totals.netRevenue / totals.units;
+  // The share of a costed rupee that goes on ingredients, applied to the
+  // average price. Over the costed lines on both sides, so an uncosted line
+  // neither raises nor lowers it.
+  const cogsRatio = totals.cogs / totals.costedRevenue;
+  const perUnitCost = averagePrice * cogsRatio + resolved.perUnitCost;
+  const contributionBeforeTickets = averagePrice * (1 - resolved.revenueRate) - perUnitCost;
+  const withPrice = { ...base, averagePrice, perUnitCost };
 
-  if (costs.fixed <= 0) {
+  if (resolved.fixed <= 0) {
+    return { ...withPrice, blocked: BREAK_EVEN_BLOCKED.noFixedCosts };
+  }
+
+  // A per-ticket cost with no tickets to spread over is unanswerable, not
+  // enormous. Reported on its own so it cannot be read as a margin problem.
+  if (resolved.perOrderCost > 0 && !(resolved.averageBasket !== null && resolved.averageBasket > 0)) {
     return {
-      ...base,
-      contributionRatio,
-      contributionPerUnit,
-      blocked: 'No fixed costs logged',
+      ...withPrice,
+      blocked: contributionBeforeTickets > 0
+        ? BREAK_EVEN_BLOCKED.noBasket
+        : BREAK_EVEN_BLOCKED.negativeContribution,
     };
   }
-  if (contributionRatio <= 0) {
+
+  const perOrderPerUnit = resolved.perOrderCost > 0
+    ? resolved.perOrderCost / resolved.averageBasket!
+    : 0;
+  const contributionPerUnit = contributionBeforeTickets - perOrderPerUnit;
+  const contributionRatio = contributionPerUnit / averagePrice;
+
+  if (contributionPerUnit <= 0) {
     return {
-      ...base,
+      ...withPrice,
       contributionRatio,
       contributionPerUnit,
-      blocked: 'Costs exceed the margin — no volume breaks even',
+      blocked: BREAK_EVEN_BLOCKED.negativeContribution,
     };
   }
 
-  const revenue = costs.fixed / contributionRatio;
+  const units = resolved.fixed / contributionPerUnit;
+  const revenue = resolved.fixed / contributionRatio;
   return {
-    ...base,
+    ...withPrice,
     contributionRatio,
     contributionPerUnit,
     revenue,
-    units: contributionPerUnit > 0 ? costs.fixed / contributionPerUnit : null,
+    units,
     progress: revenue > 0 ? totals.netRevenue / revenue : null,
   };
 }

@@ -24,7 +24,8 @@ import {
   stockoutStats, throughput, totalsFor, tradingHours, voidStats,
 } from './metrics';
 import { eventGroups } from '../lib/sessions';
-import type { DateRange, ItemBreakEven } from './metrics';
+import { BREAK_EVEN_BLOCKED } from './metrics';
+import type { CostScope, DateRange, ItemBreakEven } from './metrics';
 import type {
   CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
   OversellEvent, StockItem, StockMovement, TradingEvent, TradingSession,
@@ -248,14 +249,36 @@ export function AnalyticsView(props: AnalyticsViewProps) {
     return {
       ...base,
       byBasis: { ...base.byBasis, 'per-session': base.byBasis['per-session'] + earlierStockCost },
-      fixed: base.fixed + earlierStockCost,
       total: base.total + earlierStockCost,
       entries: base.entries + 1,
     };
   }, [scopedEntries, earlierStockCost]);
-  const be = useMemo(() => breakEven(current, scopedCosts), [current, scopedCosts]);
+
+  /**
+   * Which kind of period the costs are being resolved against.
+   *
+   * The only figure this changes is what happens to a `per-event` cost. Looking
+   * at one session out of an event, it is held back rather than shared out —
+   * apportioning it would make this session's break-even move when a *later*
+   * session trades well, which is the same moving target ADR-012 removed. The
+   * event carries it, and the panel offers the event as somewhere to go.
+   */
+  const costScope: CostScope = resolved.scope.kind === 'session'
+    ? 'session'
+    : resolved.scope.kind === 'event' ? 'event' : 'range';
+
+  /** The event this session belongs to, when it belongs to a real one. */
+  const containingEvent = useMemo(() => {
+    if (resolved.scope.kind !== 'session') return null;
+    const id = resolved.scope.id;
+    return groups.find(g => g.grouped && g.sessions.some(s => s.id === id)) ?? null;
+  }, [resolved.scope, groups]);
+
+  const be = useMemo(
+    () => breakEven(current, scopedCosts, costScope), [current, scopedCosts, costScope]);
   const beByItem = useMemo(
-    () => breakEvenByItem(items, scopedCosts, current), [items, scopedCosts, current]);
+    () => breakEvenByItem(items, scopedCosts, current, costScope),
+    [items, scopedCosts, current, costScope]);
   const voids = useMemo(() => voidStats(scopedOrders), [scopedOrders]);
   const pairs = useMemo(
     () => attachmentPairs(scopedOrders, menuItems, range).slice(0, 8),
@@ -621,7 +644,16 @@ export function AnalyticsView(props: AnalyticsViewProps) {
                   />
                 </div>
 
-                <BreakEvenByItem rows={beByItem} blocked={be.blocked} fixedCosts={scopedCosts.fixed} />
+                <BreakEvenByItem
+                  rows={beByItem}
+                  blocked={be.blocked}
+                  fixedCosts={be.fixedCosts}
+                  heldEventCosts={be.heldEventCosts}
+                  eventName={containingEvent?.name ?? null}
+                  onOpenEvent={containingEvent
+                    ? () => setScope({ kind: 'event', id: containingEvent.id })
+                    : undefined}
+                />
 
                 <RevenueChart
                   buckets={buckets}
@@ -859,20 +891,57 @@ function Sparkline({ points }: { points: number[] }) {
  * useful if you can hold it in your head on the way back to the grill.
  */
 function BreakEvenByItem({
-  rows, blocked, fixedCosts,
-}: { rows: ItemBreakEven[]; blocked?: string; fixedCosts: number }) {
+  rows, blocked, fixedCosts, heldEventCosts, eventName, onOpenEvent,
+}: {
+  rows: ItemBreakEven[];
+  blocked?: string;
+  fixedCosts: number;
+  /** Per-event rupees this figure deliberately leaves to the event (ADR-013). */
+  heldEventCosts: number;
+  eventName: string | null;
+  onOpenEvent?: () => void;
+}) {
   const theme = useSection();
   const reduced = useReducedMotion();
   const [index, setIndex] = useState(0);
+
+  /**
+   * What the event is carrying that this session is not.
+   *
+   * Said outright rather than folded in. A three-day market's pitch fee is paid
+   * once for the market; charging each day a share of it would make Saturday's
+   * break-even change after Sunday traded, which is the moving target ADR-012
+   * removed and ADR-013 keeps removed.
+   */
+  const eventNote = heldEventCosts > 0 ? (
+    <p className="text-[var(--app-text-muted)] text-[12px] leading-[17px] pt-[10px]">
+      {eventName ?? 'The event'} carries {money(heldEventCosts)} of its own on top of this, paid
+      once for the whole event rather than by this session.
+      {onOpenEvent && (
+        <button
+          type="button"
+          onClick={onOpenEvent}
+          className="ml-[6px] underline underline-offset-2 font-semibold"
+          style={{ color: theme.color }}
+          data-open-event-scope
+        >
+          See the whole event
+        </button>
+      )}
+    </p>
+  ) : null;
 
   if (rows.length === 0) {
     return (
       <Panel title="Break-even" subtitle="How much you have to sell before the day pays for itself">
         <p className="text-[var(--app-text-muted)] text-[13px] leading-[18px] py-[8px]">
-          {blocked === 'No fixed costs logged'
+          {blocked === BREAK_EVEN_BLOCKED.noFixedCosts
             ? 'Log what the day costs you — the pitch fee, staff, fuel — on the Costs tab, and this will say how many of each thing you need to sell to cover it.'
-            : blocked ?? 'Needs costed items. Assign stock to your menu items so the app knows what each one costs to make.'}
+            : blocked === BREAK_EVEN_BLOCKED.noBasket
+              ? 'You have costs charged per ticket, but no tickets in this period to spread them over. The figure comes back as soon as something sells.'
+              : blocked ?? 'Needs costed items. Assign stock to your menu items so the app knows what each one costs to make.'}
         </p>
+        {eventNote}
       </Panel>
     );
   }
@@ -950,6 +1019,7 @@ function BreakEvenByItem({
           </span>
         </div>
       </div>
+      {eventNote}
     </Panel>
   );
 }
