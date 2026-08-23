@@ -1,7 +1,10 @@
 import { useCallback, useRef, useState } from 'react';
 import { restoreAction, useHistory } from '../lib/history';
 import {
+  assertCostEntry,
+  costEntryIsCoherent,
   createEvent,
+  describeCostAmount,
   endSession as closeSession,
   newCostId,
   pauseSession,
@@ -10,7 +13,7 @@ import {
 } from '../lib/sessions';
 import type { StateCore } from './core';
 import type { ExplainNotUndoable } from './useNotUndoable';
-import type { CostEntry, Order, TradingEvent, TradingSession } from '../types';
+import type { CostBasis, CostEntry, Order, TradingEvent, TradingSession } from '../types';
 
 /**
  * Trading sessions, the events that group them, and the costs logged against
@@ -192,7 +195,7 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
   const addCost = useCallback((
     amount: number,
     note: string,
-    kind: CostEntry['kind'],
+    basis: CostBasis,
     target?: { sessionId?: string; eventId?: string },
   ) => {
     if (!(amount > 0)) return;
@@ -206,17 +209,47 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
       : target?.sessionId
         ? { sessionId: target.sessionId }
         : { sessionId: live?.id };
-    const next = [...before, {
+    // Nothing is written as a `kind` any more. The field stays on the type for
+    // the rows that predate the basis, and this is not one of them.
+    const entry = assertCostEntry({
       id: newCostId(),
       ...attach,
       amount,
       note: note.trim(),
-      kind,
+      basis,
       timestamp: Date.now(),
-    }];
+    });
+    const next = [...before, entry];
     setCostEntries(next);
     history.record(restoreAction(
-      `Logged a cost of Rs ${Math.round(amount)}`, 'costs', before, next, setCostEntries,
+      `Logged a cost of ${describeCostAmount(entry)}`, 'costs', before, next, setCostEntries,
+    ));
+  }, [snapshot, history]);
+
+  /**
+   * Re-files a cost under a different basis.
+   *
+   * This exists for the fixed/variable migration: every row written before it
+   * became `per-session`, and the ones that had said `variable` are offered
+   * back to the shop to place properly. It changes what a cost *is*, not what
+   * it cost, so the amount is left exactly as typed — and it is undoable like
+   * any other cost change.
+   *
+   * Re-filing to `per-event` needs an event to file it against; a cost that
+   * only ever had a session has none, so the basis is refused rather than
+   * written as an entry pointing at nothing.
+   */
+  const refileCost = useCallback((id: string, basis: CostBasis) => {
+    const before = snapshot.current.costEntries;
+    const target = before.find(c => c.id === id);
+    if (!target || target.basis === basis) return;
+    const candidate = { ...target, basis };
+    if (!costEntryIsCoherent(candidate)) return;
+    const next = before.map(c => (c.id === id ? candidate : c));
+    setCostEntries(next);
+    history.record(restoreAction(
+      `Re-filed a cost as ${basis}`, 'costs', before, next, setCostEntries,
+      undefined, `cost:${id}:basis`,
     ));
   }, [snapshot, history]);
 
@@ -226,7 +259,9 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
     const next = before.filter(c => c.id !== id);
     setCostEntries(next);
     history.record(restoreAction(
-      `Removed a cost of Rs ${Math.round(removed?.amount ?? 0)}`, 'costs', before, next, setCostEntries,
+      // Described through the basis, or a per-revenue cost reads as rupees.
+      `Removed a cost of ${removed ? describeCostAmount(removed) : 'nothing'}`,
+      'costs', before, next, setCostEntries,
     ));
   }, [snapshot, history]);
 
@@ -282,6 +317,7 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
       ungroup,
       claimTicket,
       addCost,
+      refileCost,
       deleteCost,
     },
   };

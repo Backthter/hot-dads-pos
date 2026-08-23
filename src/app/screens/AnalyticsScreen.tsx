@@ -39,7 +39,10 @@ export function AnalyticsScreen({
       events={sessions.state.tradingEvents}
       costs={sessions.state.costEntries}
       onAddCost={sessions.actions.addCost}
+      onRefileCost={sessions.actions.refileCost}
       onDeleteCost={sessions.actions.deleteCost}
+      costBasisNoticeDismissed={settings.state.costBasisNoticeDismissed}
+      onDismissCostBasisNotice={() => settings.actions.setCostBasisNoticeDismissed(true)}
       taxEnabled={settings.state.taxEnabled}
       revenueLocked={settings.state.revenueLocked}
       onUnlockRevenue={() => settings.actions.setShowRevenuePin(true)}

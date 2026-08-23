@@ -1,4 +1,4 @@
-import type { CostEntry, Order, TradingEvent, TradingSession } from '../types';
+import type { CostBasis, CostEntry, Order, TradingEvent, TradingSession } from '../types';
 
 /**
  * Trading sessions and the events that group them.
@@ -232,6 +232,83 @@ export function costsForEvent(
     c.eventId === eventId
     || (c.sessionId !== undefined && sessionIds.has(c.sessionId))
   ));
+}
+
+/* ------------------------------------------------------------------- costs */
+
+/**
+ * A per-event cost has to name its event.
+ *
+ * `per-event` means "paid once for the whole market", and the only thing that
+ * makes such a cost findable is the event id — `costsForEvent` and
+ * `resolveScope`'s `costsOf` both match on it. An entry with the basis and no
+ * event is an amount attached to nothing: it is counted in no event figure, and
+ * it looks correct on the form that created it.
+ *
+ * Checked rather than assumed, because the failure is silent. The call sites
+ * are the writes — where a bad entry can still be refused — not the load, which
+ * has to stay openable; `costEntryFromRow` demotes instead.
+ */
+export function costEntryIsCoherent(entry: CostEntry): boolean {
+  return entry.basis !== 'per-event' || Boolean(entry.eventId);
+}
+
+/** Throws on an incoherent entry. Returns it unchanged so it can wrap a write. */
+export function assertCostEntry(entry: CostEntry): CostEntry {
+  if (!costEntryIsCoherent(entry)) {
+    throw new Error(
+      `Cost ${entry.id} is filed per-event with no event. A per-event cost is paid once `
+      + 'for the whole event, so without one it belongs to nothing and appears in no figure.',
+    );
+  }
+  return entry;
+}
+
+/**
+ * How each basis reads around the amount.
+ *
+ * One table, because the form, the history list and the undo label all have to
+ * say the same thing about the same number. `prefix` is empty for the one basis
+ * whose amount is not money — a percentage with "Rs" in front of it is a lie
+ * the eye reads faster than the label that would correct it.
+ */
+export const COST_BASIS_UNIT: Record<CostBasis, { prefix: string; suffix: string }> = {
+  'per-session': { prefix: 'Rs', suffix: 'for this session' },
+  'per-event': { prefix: 'Rs', suffix: 'for this event' },
+  'per-order': { prefix: 'Rs', suffix: 'per ticket' },
+  'per-unit': { prefix: 'Rs', suffix: 'per item sold' },
+  'per-revenue': { prefix: '', suffix: '% of sales' },
+};
+
+/** What a basis is called on screen. */
+export const COST_BASIS_LABEL: Record<CostBasis, string> = {
+  'per-session': 'Per session',
+  'per-event': 'Whole event',
+  'per-order': 'Per ticket',
+  'per-unit': 'Per item',
+  'per-revenue': 'Share of sales',
+};
+
+/** `Rs 1,200 for this session`, `18 % of sales`. Amount and unit, never apart. */
+export function describeCostAmount(entry: Pick<CostEntry, 'amount' | 'basis'>): string {
+  const { prefix, suffix } = COST_BASIS_UNIT[entry.basis];
+  const amount = Math.round(entry.amount * 100) / 100;
+  return `${prefix ? `${prefix} ` : ''}${amount.toLocaleString()} ${suffix}`;
+}
+
+/**
+ * Entries the fixed/variable migration could not place, and is not going to
+ * guess at.
+ *
+ * Everything written before Phase 1A became `per-session`, including the rows
+ * filed as `variable` — deciding from a cost's name that "fuel" was really
+ * per-revenue would invent information and change a figure the shop has already
+ * seen. So the ones that said `variable` are marked instead, and the shop is
+ * asked where they belong. A row that has since been re-filed no longer answers
+ * to this, because its basis is no longer the one the migration handed it.
+ */
+export function needsRefiling(entry: CostEntry): boolean {
+  return entry.kind === 'variable' && entry.basis === 'per-session';
 }
 
 /**

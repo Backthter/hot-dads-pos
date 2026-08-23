@@ -26,7 +26,7 @@ import {
 import { eventGroups } from '../lib/sessions';
 import type { DateRange, ItemBreakEven } from './metrics';
 import type {
-  CostEntry, CostKind, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
+  CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
   OversellEvent, StockItem, StockMovement, TradingEvent, TradingSession,
 } from '../types';
 
@@ -50,8 +50,13 @@ export interface AnalyticsViewProps {
   sessions: TradingSession[];
   events: TradingEvent[];
   costs: CostEntry[];
-  onAddCost: (amount: number, note: string, kind: CostKind, target?: { sessionId?: string; eventId?: string }) => void;
+  onAddCost: (amount: number, note: string, basis: CostBasis, target?: { sessionId?: string; eventId?: string }) => void;
+  /** Changes what a cost is charged per. The migration notice is its one caller. */
+  onRefileCost: (id: string, basis: CostBasis) => void;
   onDeleteCost: (id: string) => void;
+  /** Whether the fixed/variable migration notice has been dealt with already. */
+  costBasisNoticeDismissed: boolean;
+  onDismissCostBasisNotice: () => void;
   taxEnabled: boolean;
   revenueLocked: boolean;
   onUnlockRevenue: () => void;
@@ -237,8 +242,12 @@ export function AnalyticsView(props: AnalyticsViewProps) {
   const scopedCosts = useMemo(() => {
     const base = costSummary(scopedEntries);
     if (earlierStockCost <= 0) return base;
+    // Stock bought before this event started is money already committed to it,
+    // so it joins the per-session total rather than any of the rates — it does
+    // not scale with what sells, it was spent before anything did.
     return {
       ...base,
+      byBasis: { ...base.byBasis, 'per-session': base.byBasis['per-session'] + earlierStockCost },
       fixed: base.fixed + earlierStockCost,
       total: base.total + earlierStockCost,
       entries: base.entries + 1,
@@ -771,9 +780,12 @@ export function AnalyticsView(props: AnalyticsViewProps) {
                   sessions={sessions}
                   events={events}
                   onAdd={props.onAddCost}
+                  onRefile={props.onRefileCost}
                   onDelete={props.onDeleteCost}
                   scopeLabel={resolved.label}
                   scopedCosts={scopedEntries}
+                  noticeDismissed={props.costBasisNoticeDismissed}
+                  onDismissNotice={props.onDismissCostBasisNotice}
                 />
               </Screen>
             )}

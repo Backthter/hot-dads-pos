@@ -1,7 +1,7 @@
 import { resolveDealComponent } from '../lib/inventory';
 import { sessionTradingHours } from '../lib/sessions';
 import type {
-  CartItem, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
+  CartItem, CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
   OversellEvent, StockItem, StockMovement, TradingSession,
 } from '../types';
 
@@ -768,19 +768,60 @@ export function eventPerformance(
 /* ------------------------------------------------------------ break-even */
 
 export interface CostSummary {
-  fixed: number;
-  variable: number;
+  /**
+   * The total of `amount` within each basis, and only within it.
+   *
+   * Amounts are commensurable inside a basis and nowhere else: two per-ticket
+   * costs of Rs 4 and Rs 2 are Rs 6 a ticket, while Rs 6 a ticket and 18% of
+   * sales have no sum at all. Turning the four scaling bases into money for a
+   * period needs the period's tickets, units and revenue, which is
+   * `breakEven`'s job and is 1A-ii's work.
+   */
+  byBasis: Record<CostBasis, number>;
+  /**
+   * Rupees committed for the period whatever sells: `per-session` plus
+   * `per-event`.
+   *
+   * The rate bases are deliberately absent. Adding Rs 4 a ticket in here as if
+   * it were Rs 4 is the error the basis exists to stop — it produces a number
+   * that looks like money, is not, and gets divided by revenue downstream.
+   */
   total: number;
   entries: number;
+  /**
+   * @deprecated The pre-1A shape, kept only so `breakEven` and
+   * `breakEvenByItem` compile unchanged until 1A-ii replaces them.
+   *
+   * `fixed` is `total` — the rupees committed regardless of volume, which is
+   * what break-even divides by contribution. `variable` is 0 and will stay 0
+   * until 1A-ii: the bases that scale are *rates*, and the old field wanted
+   * rupees, so anything put here would be a rate read as an amount. Zero
+   * understates a stall's per-ticket costs, which is visible and correctable;
+   * a wrong-by-a-factor-of-the-ticket-count figure is neither. Every row that
+   * existed before this phase migrated to `per-session`, so on historical data
+   * the two agree exactly.
+   */
+  fixed: number;
+  /** @deprecated See `fixed`. */
+  variable: number;
 }
 
+const ZERO_BY_BASIS = (): Record<CostBasis, number> => ({
+  'per-session': 0, 'per-event': 0, 'per-order': 0, 'per-unit': 0, 'per-revenue': 0,
+});
+
+/**
+ * Totals a set of costs, one total per basis.
+ *
+ * Nothing is added across bases. The old summary returned `{ fixed, variable }`
+ * and both were rupees, which is why a per-unit cost filed as variable could be
+ * divided by revenue and treated as a rate — see ADR-012.
+ */
 export function costSummary(costs: CostEntry[]): CostSummary {
-  let fixed = 0;
-  let variable = 0;
-  for (const c of costs) {
-    if (c.kind === 'variable') variable += c.amount; else fixed += c.amount;
-  }
-  return { fixed, variable, total: fixed + variable, entries: costs.length };
+  const byBasis = ZERO_BY_BASIS();
+  for (const c of costs) byBasis[c.basis] += c.amount;
+  const total = byBasis['per-session'] + byBasis['per-event'];
+  return { byBasis, total, entries: costs.length, fixed: total, variable: 0 };
 }
 
 export interface BreakEven {

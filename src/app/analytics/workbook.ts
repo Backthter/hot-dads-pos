@@ -253,9 +253,17 @@ export function buildDataWorkbook(input: WorkbookInput): Uint8Array {
     Cost_ID: c.id,
     Timestamp: iso(c.timestamp),
     Amount: round2(c.amount),
-    Kind: c.kind,
+    // The unit is not the same for every row: rupees for the first four bases,
+    // percentage points for per-revenue. A sheet that omitted it would be added
+    // up by hand into a number that is not money.
+    Basis: c.basis,
+    Amount_Unit: c.basis === 'per-revenue' ? '% of sales' : 'Rs',
+    /** Blank for anything written since Phase 1A. See ADR-012. */
+    Kind_Before_1A: c.kind ?? '',
     Session_ID: c.sessionId ?? '',
     Session_Name: input.sessions.find(s => s.id === c.sessionId)?.name ?? '',
+    Event_ID: c.eventId ?? '',
+    Event_Name: input.events.find(e => e.id === c.eventId)?.name ?? '',
     Note: c.note,
   })));
 

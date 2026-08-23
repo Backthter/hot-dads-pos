@@ -33,6 +33,14 @@ export function useSettings(currentView: View) {
   const [taxRateInput, setTaxRateInput] = useState('0');
   const [grillCapacityInput, setGrillCapacityInput] = useState('8');
   const [tapToExpandParked, setTapToExpandParked] = useState(false);
+  /**
+   * Whether the fixed/variable migration notice has been dealt with.
+   *
+   * A settings row rather than screen state: it is an answer the shop gave
+   * once, and asking again after a restart would make it look as though the
+   * answer had not been taken.
+   */
+  const [costBasisNoticeDismissed, setCostBasisNoticeDismissed] = useState(false);
   const [lightMode, setLightMode] = useState(false);
   /** Whole-interface zoom. Larger is easier to hit on a counter-top screen. */
   const [uiScale, setUiScale] = useState(1.12);
@@ -97,6 +105,9 @@ export function useSettings(currentView: View) {
 
     const savedTapToExpand = await getAppSetting('tap_to_expand_parked');
     if (savedTapToExpand !== null) setTapToExpandParked(savedTapToExpand === 'true');
+
+    const savedCostNotice = await getAppSetting('cost_basis_notice_dismissed');
+    if (savedCostNotice !== null) setCostBasisNoticeDismissed(savedCostNotice === 'true');
 
     const savedUiScale = await getAppSetting('ui_scale');
     if (savedUiScale !== null) {
@@ -249,6 +260,7 @@ export function useSettings(currentView: View) {
       grillCapacity,
       grillCapacityRef,
       tapToExpandParked,
+      costBasisNoticeDismissed,
       lightMode,
       uiScale,
       fullscreen,
@@ -266,6 +278,7 @@ export function useSettings(currentView: View) {
       setTaxRateInput,
       setGrillCapacityInput,
       setTapToExpandParked,
+      setCostBasisNoticeDismissed,
       setLightMode,
       setUiScale,
       setCurrentRevenuePin,
@@ -294,6 +307,7 @@ export function useSettingsPersistence(settings: SettingsHandle, dataLoaded: boo
   const {
     autoPrint, printerName, discountRequiresPin, taxEnabled, taxRateInput,
     lightMode, grillCapacityInput, tapToExpandParked, uiScale,
+    costBasisNoticeDismissed,
   } = settings.state;
 
   useEffect(() => {
@@ -308,7 +322,9 @@ export function useSettingsPersistence(settings: SettingsHandle, dataLoaded: boo
       await setAppSetting('grill_capacity', grillCapacityInput);
       await setAppSetting('tap_to_expand_parked', String(tapToExpandParked));
       await setAppSetting('ui_scale', String(uiScale));
+      await setAppSetting('cost_basis_notice_dismissed', String(costBasisNoticeDismissed));
     })();
   }, [autoPrint, printerName, discountRequiresPin, taxEnabled, taxRateInput,
-      lightMode, grillCapacityInput, tapToExpandParked, uiScale, dataLoaded]);
+      lightMode, grillCapacityInput, tapToExpandParked, uiScale,
+      costBasisNoticeDismissed, dataLoaded]);
 }

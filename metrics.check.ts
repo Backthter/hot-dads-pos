@@ -10,12 +10,17 @@ import {
   queueBands, resolveRange, stockoutStats, totalsFor, voidStats,
 } from './src/app/analytics/metrics';
 import {
-  endSession, pauseSession, resumeSession, sessionTradingHours, startSession,
+  costEntryIsCoherent, costsForEvent, endSession, needsRefiling, pauseSession, resumeSession,
+  sessionTradingHours, startSession,
 } from './src/app/lib/sessions';
+import {
+  COST_ENTRY_COLUMNS, costEntryFromRow, costEntryToRow,
+} from './src/db/costEntryRows';
 import { resolveScope } from './src/app/analytics/scope';
 import {
   categoryIndex, matchesSearch, parseSearch, searchHaystack, sessionIndex,
 } from './src/app/analytics/search';
+import type { CostSummary } from './src/app/analytics/metrics';
 import type {
   CostEntry, InventorySnapshot, Order, OversellEvent, StockItem, StockMovement,
 } from './src/app/types';
@@ -51,14 +56,26 @@ const line = (id: string, name: string, qty: number, price: number, unitCost?: n
 // Gross ratio 0.6; variable costs of 200 are 0.2 of revenue; contribution 0.4.
 // Break-even revenue = 1000 / 0.4 = 2500. Contribution per unit = 100 × 0.4 = 40,
 // so break-even units = 1000 / 40 = 25.
+//
+// The summary is written by hand rather than taken from `costSummary`, which
+// since Phase 1A returns `variable: 0` always — a basis that scales is a rate,
+// and resolving a rate to rupees needs the period's tickets, units and revenue.
+// Pairing the two up again is 1A-ii's work. Until then these cases pin
+// `breakEven`'s own arithmetic, which is unchanged and has to stay that way
+// while the model around it moves.
 console.log('\nBreak-even');
 const beOrders = [order({ items: [line('a', 'Burger', 10, 100, 40)], subtotal: 1000, total: 1000 })];
 const beTotals = totalsFor(beOrders);
-const beCosts = costSummary([
-  { id: 'c1', amount: 1000, note: 'pitch', kind: 'fixed', timestamp: T },
-  { id: 'c2', amount: 200, note: 'boxes', kind: 'variable', timestamp: T },
-] as CostEntry[]);
-const be = breakEven(beTotals, beCosts);
+const summary = (fixed: number, variable: number): CostSummary => ({
+  byBasis: {
+    'per-session': fixed, 'per-event': 0, 'per-order': 0, 'per-unit': 0, 'per-revenue': 0,
+  },
+  total: fixed,
+  entries: 2,
+  fixed,
+  variable,
+});
+const be = breakEven(beTotals, summary(1000, 200));
 check('contribution ratio', be.contributionRatio, 0.4);
 check('contribution per unit', be.contributionPerUnit, 40);
 check('break-even revenue', be.revenue, 2500);
@@ -71,11 +88,113 @@ check('blocked without fixed costs', noCosts.blocked, 'No fixed costs logged');
 check('and reports no revenue figure', noCosts.revenue, null);
 
 // Costs that exceed the margin have no break-even at any volume.
-const drowning = breakEven(beTotals, costSummary([
-  { id: 'c1', amount: 500, note: 'pitch', kind: 'fixed', timestamp: T },
-  { id: 'c2', amount: 900, note: 'staff', kind: 'variable', timestamp: T },
-] as CostEntry[]));
+const drowning = breakEven(beTotals, summary(500, 900));
 check('blocked when margin is negative', drowning.revenue, null);
+
+/* ------------------------------------------------------------ cost basis */
+// Each basis totals on its own and touches no other. The amounts are chosen so
+// that any leak between them shows up as a wrong figure rather than a right one
+// reached by accident: 100, 200, 4, 12 and 18 share no sums.
+console.log('\nCost basis');
+const cost = (over: Partial<CostEntry>): CostEntry => ({
+  id: 'c', amount: 0, note: '', basis: 'per-session', timestamp: T, ...over,
+});
+const eachBasis = costSummary([
+  cost({ id: 'c1', amount: 100, basis: 'per-session' }),
+  cost({ id: 'c2', amount: 200, basis: 'per-event', eventId: 'e1' }),
+  cost({ id: 'c3', amount: 4, basis: 'per-order' }),
+  cost({ id: 'c4', amount: 12, basis: 'per-unit' }),
+  cost({ id: 'c5', amount: 18, basis: 'per-revenue' }),
+]);
+check('per-session in isolation', eachBasis.byBasis['per-session'], 100);
+check('per-event in isolation', eachBasis.byBasis['per-event'], 200);
+check('per-order in isolation', eachBasis.byBasis['per-order'], 4);
+check('per-unit in isolation', eachBasis.byBasis['per-unit'], 12);
+check('per-revenue in isolation', eachBasis.byBasis['per-revenue'], 18);
+// The rates are not money yet, so they are not in the money total: 100 + 200.
+check('committed rupees exclude the rates', eachBasis.total, 300);
+check('every entry counted', eachBasis.entries, 5);
+
+// Two costs on the same basis do add — within a basis the unit is the same.
+const sameBasis = costSummary([
+  cost({ id: 'c1', amount: 4, basis: 'per-order' }),
+  cost({ id: 'c2', amount: 2, basis: 'per-order' }),
+]);
+check('same basis adds', sameBasis.byBasis['per-order'], 6);
+check('and still is not rupees committed', sameBasis.total, 0);
+
+/* -------------------------------------------------- the fixed/variable migration */
+// Everything written before Phase 1A becomes per-session, including the rows
+// filed as `variable` — inferring a basis from a cost's name would invent
+// information and change a figure the shop has already read. The `variable`
+// ones are marked for re-filing instead.
+console.log('\nCost migration');
+const migratedRow = costEntryFromRow({
+  id: 'c-old', session_id: 's1', event_id: null, amount: 200, note: 'boxes',
+  kind: 'variable', basis: 'per-session', timestamp: T,
+});
+check('a variable row lands on per-session', migratedRow.basis, 'per-session');
+check('and keeps what it used to say', migratedRow.kind, 'variable');
+check('and is flagged for re-filing', needsRefiling(migratedRow), true);
+
+const fixedRow = costEntryFromRow({
+  id: 'c-old2', session_id: 's1', amount: 1000, note: 'pitch',
+  kind: 'fixed', basis: 'per-session', timestamp: T,
+});
+check('a fixed row lands on per-session too', fixedRow.basis, 'per-session');
+check('and is left alone', needsRefiling(fixedRow), false);
+
+// Re-filed, it stops asking: the basis is no longer the one it was handed.
+check('re-filing clears the flag', needsRefiling({ ...migratedRow, basis: 'per-order' }), false);
+// A row written since the migration carries no kind at all.
+check('a new row has no kind', costEntryFromRow({
+  id: 'c-new', amount: 4, note: 'bags', kind: '', basis: 'per-order', timestamp: T,
+}).kind, undefined);
+check('and is never flagged', needsRefiling(costEntryFromRow({
+  id: 'c-new', amount: 4, note: 'bags', kind: '', basis: 'per-order', timestamp: T,
+})), false);
+
+/* --------------------------------------------- costs through save and load */
+// `CostEntry.eventId` had no column: it was written to state, never to SQLite,
+// and every event-level cost came back after a restart as a cost belonging to
+// nothing. This is the mapping both directions use, so a column that only one
+// side knows about fails here.
+console.log('\nCost round trip');
+const eventCost = cost({
+  id: 'c-evt', eventId: 'evt-1', amount: 3000, note: 'pitch for the market',
+  basis: 'per-event',
+});
+const columns = [...COST_ENTRY_COLUMNS];
+const written = costEntryToRow(eventCost);
+const readBack = costEntryFromRow(
+  Object.fromEntries(columns.map((name, i) => [name, written[i]])),
+);
+check('event id survives the round trip', readBack.eventId, 'evt-1');
+check('basis survives it', readBack.basis, 'per-event');
+check('amount survives it', readBack.amount, 3000);
+check('note survives it', readBack.note, 'pitch for the market');
+check('session id stays absent', readBack.sessionId, undefined);
+// Field by field above, then the whole thing, so a column added to one side
+// and not the other is caught even when nobody thought to check it by name.
+// Keys are sorted because `check` compares JSON and the two are built in
+// different orders, which is not a difference about the data.
+const sortKeys = (o: object) =>
+  Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined).sort(
+    ([a], [b]) => a.localeCompare(b)));
+check('the whole entry is unchanged', sortKeys(readBack), sortKeys(eventCost));
+// And it is still findable as the event's, which is the point of storing it.
+check('and it is found by its event', costsForEvent([readBack], 'evt-1', new Set()).length, 1);
+
+// A per-event cost whose event went missing is demoted rather than thrown at —
+// the app has to open. The write side refuses it instead.
+const eventless = costEntryFromRow({
+  id: 'c-orphan', event_id: null, amount: 3000, note: 'pitch',
+  kind: '', basis: 'per-event', timestamp: T,
+});
+check('an eventless per-event row is demoted', eventless.basis, 'per-session');
+check('per-event without an event is incoherent',
+  costEntryIsCoherent({ ...eventCost, eventId: undefined }), false);
+check('and with one it is fine', costEntryIsCoherent(eventCost), true);
 
 /* ------------------------------------------------------------- void rate */
 // Three live orders worth 1000 and one voided worth 200.
