@@ -8,7 +8,7 @@
 import {
   BREAK_EVEN_BLOCKED, attachmentPairs, breakEven, breakEvenByItem, costSummary, deadStock,
   foodCost, inventoryTurnover, itemMargins, itemPerformance, queueBands, resolveRange,
-  stockoutStats, totalsFor, voidStats,
+  stockPurchasesValue, stockoutStats, totalsFor, voidStats,
 } from './src/app/analytics/metrics';
 import {
   costEntryIsCoherent, costsForEvent, endSession, needsRefiling, pauseSession, resumeSession,
@@ -408,6 +408,29 @@ const orphan = foodCost(
   { start: T + 2 * HOUR, end: T + 100 * HOUR, label: 'orphan' }, T + 50 * HOUR);
 check('no anchor, no figure', orphan.actual, null);
 check('and it says why', typeof orphan.blocked, 'string');
+
+/* --------------------------------------------- one definition of a purchase */
+// `stockPurchasesValue` counted `added` and `packet`; `foodCost` kept its own
+// loop and counted `correction` as well. The same delivery was therefore two
+// different numbers on the same screen, and nothing said which to believe.
+//
+// A purchase is a receipt (ADR-014). This ledger has both receipts and a
+// correction, and the correction is the one that used to make them differ: it
+// has no cost of its own, so it was valued at today's cost per unit — 5 × 50 =
+// Rs 250 of outlay that never happened.
+console.log('\nPurchases — a purchase is a receipt');
+const withCorrection: StockMovement[] = [
+  { id: 'p1', stockItemId: 's1', delta: 40, resulting: 140, reason: 'added', totalCost: 2000, timestamp: T + HOUR },
+  { id: 'p2', stockItemId: 's1', delta: 20, resulting: 160, reason: 'packet', totalCost: 500, timestamp: T + 2 * HOUR },
+  { id: 'p3', stockItemId: 's1', delta: 5, resulting: 165, reason: 'correction', timestamp: T + 3 * HOUR },
+];
+const purchaseWindow = { start: T, end: T + 10 * HOUR, label: 'purchases' };
+const directly = stockPurchasesValue(withCorrection, stock, purchaseWindow.start, purchaseWindow.end);
+const throughFoodCost = foodCost(
+  beTotals, withCorrection, [], stock, purchaseWindow, T + 50 * HOUR).purchases;
+check('receipts only', directly, 2500);
+check('food cost agrees exactly', throughFoodCost, directly);
+check('the correction is not an outlay', directly, 2500);
 
 /* -------------------------------------- food cost — the ledger beats a snapshot */
 // Mince ran 100 → 60 before the window opened. The morning's snapshot still

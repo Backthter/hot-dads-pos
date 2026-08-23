@@ -708,6 +708,13 @@ export function breakEvenByItem(
  * stocking up for a market leaves the till whether or not it all sells, and a
  * stall owner asking "did today pay for itself" usually means the outlay, not
  * the portion that happened to be eaten.
+ *
+ * **A purchase is a receipt** (ADR-014): `added` and `packet`, and nothing
+ * else. A `correction` is somebody reconciling the shelf with the book — it
+ * carries no cost data and represents no money leaving the till. This is the
+ * only definition of a purchase in the program; `foodCost` calls straight into
+ * it rather than keeping a second one, which is how the two came to disagree
+ * about the same delivery.
  */
 export function stockPurchasesValue(
   movements: StockMovement[],
@@ -1721,17 +1728,31 @@ export function foodCost(
   const theoretical = totals.cogs;
   const theoreticalPct = totals.netRevenue > 0 ? (theoretical / totals.netRevenue) * 100 : null;
 
-  let purchases = 0;
+  /*
+   * One definition of a purchase, in one place.
+   *
+   * This loop used to count `added`, `packet` **and** `correction`, while
+   * `stockPurchasesValue` counted only the first two — so the same delivery was
+   * two different numbers, on the same screen, with nothing saying which was
+   * which. A shop reconciling "stock purchases" against the purchases line
+   * inside actual food cost found they disagreed and had no way to tell which
+   * one to believe.
+   *
+   * The rule that settles it: **a purchase is a receipt** (ADR-014). A
+   * correction carries no cost data and means "the shelf disagreed with the
+   * book" — it is a measurement of what was already there, not money going out
+   * of the till. Costing one at today's cost per unit invents an outlay that
+   * never happened, and does it in the direction that makes food cost look
+   * worse the more carefully a shop counts.
+   */
+  const purchases = stockPurchasesValue(movements, stockItems, range.start, range.end);
+
   let countedAt: number | null = null;
   for (const m of movements) {
     if (m.timestamp < range.start || m.timestamp >= range.end) continue;
     if (m.reason === 'stocktake' && (countedAt === null || m.timestamp > countedAt)) {
       countedAt = m.timestamp;
     }
-    if (m.delta <= 0 || m.reversed) continue;
-    if (m.reason !== 'added' && m.reason !== 'packet' && m.reason !== 'correction') continue;
-    const unit = m.unitCost ?? stockItems.find(s => s.id === m.stockItemId)?.costPerUnit ?? 0;
-    purchases += m.totalCost ?? unit * m.delta;
   }
 
   const hasLedger = movements.length > 0;

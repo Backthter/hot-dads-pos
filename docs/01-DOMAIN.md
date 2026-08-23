@@ -237,7 +237,10 @@ is append-only (invariant 1).
 - **`reason`** — `added`, `packet`, `sold`, `returned`, `waste`, `correction`,
   `edit`, `drained` or `stocktake`. The distinction matters: `consumptionRate`
   counts only `sold` and `waste`, or restocking would read as consumption, and
-  `foodCost` counts only `added`, `packet` and `correction` as purchases.
+  a **purchase is a receipt** — `added` and `packet`, nothing else (ADR-014).
+  `stockPurchasesValue` is the only place that decides this, and `foodCost`
+  calls it rather than keeping a second list; when it kept its own, it counted
+  `correction` too and the two figures disagreed about the same delivery.
 - **`referenceType` / `referenceId`** — what caused this. `referenceId` is
   always an immutable id: `order.id`, or the id of the movement being reversed.
   Never a display string like an order number.
