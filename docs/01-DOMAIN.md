@@ -143,11 +143,37 @@ about the business.
 
 A cost the POS cannot observe: stall fee, staff, fuel, packaging. Ingredient
 cost comes from the stock ledger and needs no typing, so this is deliberately a
-two-field form.
+short form.
 
-`kind` is `fixed` or `variable`, and the split is not bookkeeping pedantry:
-break-even revenue is fixed costs ÷ contribution margin, so filing a per-unit
-cost as fixed inflates both sides of that division silently.
+`basis` says what the amount is charged **per**, and is the field the rest of
+the money model turns on (ADR-012):
+
+| Basis | Paid | Example |
+|---|---|---|
+| `per-session` | once per service | pitch fee, a staff shift |
+| `per-event` | once for the whole event | a three-day market pitch |
+| `per-order` | with every ticket | bags, receipt roll, cutlery |
+| `per-unit` | with every item sold | a portion cup |
+| `per-revenue` | as a true percentage | delivery commission, card fees |
+
+`amount` is **rupees for the first four bases and percentage points for
+`per-revenue`**. It is the only field in the app whose meaning depends on a
+sibling field, and it is one field rather than two because a rupee column and a
+rate column would each be null on most rows — which stops "no amount recorded"
+from being tellable apart from "an amount of zero", and that distinction is
+invariant 2.
+
+Amounts are commensurable *within* a basis and nowhere else. Two per-ticket
+costs of Rs 4 and Rs 2 are Rs 6 a ticket; Rs 6 a ticket and 18% of sales have no
+sum. `costSummary` in `src/app/analytics/metrics.ts` therefore returns a total
+per basis, and its `total` is the rupees actually committed — `per-session` plus
+`per-event` — because a rate becomes money only once the period's tickets, units
+or revenue are known.
+
+The predecessor was `kind: 'fixed' | 'variable'`, which never said what a
+variable cost varied with; ADR-012 records what that cost. The column is
+retained on historical rows and the field survives on the type as deprecated, so
+what a row used to say stays recoverable. Nothing writes it.
 
 A cost carries a **session id or an event id, never both**. Some costs are not a
 session's — the pitch fee for a three-day market is paid once, for the market,
@@ -156,9 +182,12 @@ it to the event lets event-level profit be worked out without pretending it
 happened on a particular afternoon. A cost entered outside any session carries
 neither, and counts only towards date-scoped figures.
 
-> **Known gap.** `CostEntry.eventId` has no column in `cost_entries` and is
-> neither read nor written by `persistence.ts`. Event-level costs work in memory
-> and are lost on reload. See the Phase 0 report.
+`basis: 'per-event'` **requires** `eventId`. It is asserted at the write sites
+by `assertCostEntry` in `src/app/lib/sessions.ts` rather than assumed: a
+per-event cost with no event is an amount attached to nothing, invisible to
+every event figure and correct-looking on the form that created it. The load
+path demotes such a row to `per-session` instead of throwing, because a shop
+with one malformed row still has to be able to open its till.
 
 ---
 

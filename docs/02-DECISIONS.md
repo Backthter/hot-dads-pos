@@ -350,3 +350,85 @@ that is the price of not having partial writes. A reducer or store library would
 be the conventional next step and was not taken, because the ref pattern is
 doing real work that a naive migration would break at exactly the moment it
 matters — rapid input at a till.
+
+---
+
+## ADR-012 — Cost entries carry a basis, not a fixed/variable kind
+
+**Status:** accepted · 2026-08
+
+**Context:** A cost entry carried `kind: 'fixed' | 'variable'`. The split was
+never given an ADR, so this supersedes nothing — it is the first record of a
+model that was in the program from the beginning.
+
+The problem is that "variable" does not say what the cost varies *with*. Bags
+vary with tickets, portions vary with items sold, a delivery commission varies
+with revenue, and a staff shift varies with nothing at all, and all four were
+one word. `breakEven` had to guess, and the guess it made is the reason this is
+being changed: it took the typed rupee total of the variable costs, divided it
+by revenue-so-far, and treated the result as a rate. So a shop that logged Rs
+200 of boxes in the morning had a break-even target that *moved as sales came
+in* — one number at ten o'clock, another at four, on identical facts. Early in
+a service the ratio is enormous and break-even is unreachable; late in a good
+one it shrinks towards nothing and the target flatters itself. The figure was
+not merely imprecise, it was a function of when you looked at it, which is the
+one thing a target must never be.
+
+`breakEvenByItem` shares the flaw through the same `variableRatio`.
+
+**Decision:** `CostEntry.basis: CostBasis` replaces `kind`, with five values
+that each name a denominator: `per-session`, `per-event`, `per-order`,
+`per-unit`, `per-revenue`. `amount` is rupees for the first four and percentage
+points for the last — the only field in the app whose meaning depends on a
+sibling field, documented on the type and beside the input that types it.
+
+`costSummary` returns a total per basis and adds nothing across bases. Its
+`total` is the rupees genuinely committed for a period — `per-session` plus
+`per-event` — because a rate becomes money only once the period's tickets, units
+or revenue are known, and that resolution belongs in `breakEven` rather than in
+a summary.
+
+`per-event` requires an `eventId`. It is asserted at the write sites rather than
+assumed: an entry with the basis and no event is an amount attached to nothing,
+findable by no event figure, and correct-looking on the form that made it.
+
+**Rejected:** *Inferring a basis from the cost's name during the migration.* A
+row noted "fuel" or "boxes" reads like a rate, and a rule that turned those into
+`per-order` or `per-revenue` would have placed most rows correctly. It was
+rejected because the ones it placed wrongly would be indistinguishable from the
+ones it placed rightly, and because the output is a change to a historical
+figure: a shop that has already read, discussed and acted on last month's
+break-even would find it different, with nothing on screen saying why or that
+anything had been assumed. Inventing information is worse than admitting there
+is none — every pre-existing row becomes `per-session`, the rows that said
+`variable` are listed for the shop to re-file, and the shop is the only party
+that actually knows what it bought.
+
+Also rejected: *dropping the `kind` column* once nothing read it. Historical
+rows carry it, and it is the only surviving record of how they were filed under
+the old model; dropping it makes the pre-migration interpretation
+unrecoverable, and keeping a column nothing writes costs nothing. It is still
+written back on save, because `INSERT OR REPLACE` replaces the whole row and a
+statement that omitted the column would let SQLite quietly restate every
+historical `variable` as the default `fixed`.
+
+Also rejected: *two amount columns*, one rupee and one rate. Every row would
+then have a hole in it, and "no amount recorded" would stop being tellable apart
+from "an amount of zero" for whichever column happened to be empty — which is
+invariant 2, in the one place the app is least able to notice.
+
+**Consequences:** Break-even stops depending on when it is read, once 1A-ii
+rewrites it to resolve each basis against the period's own volumes. Until then
+`breakEven` is unchanged and takes the deprecated `fixed`/`variable` fields
+`costSummary` still carries: `fixed` is the committed rupees, and `variable` is
+0 rather than a rate misread as an amount.
+
+Break-even therefore moves for any shop that had logged variable costs: those
+amounts now count as committed rather than as a share of revenue, so the target
+rises. That is not a regression to be smoothed over — it is the old figure's
+error becoming visible — but it is a visible change to a number people rely on,
+and the migration notice is what explains it at the moment it happens.
+
+Nothing may total amounts across bases. Code that adds Rs 4 a ticket to 18% of
+sales produces a plausible number that is not money, and the shape of
+`CostSummary` is deliberately awkward to misuse in that direction.
