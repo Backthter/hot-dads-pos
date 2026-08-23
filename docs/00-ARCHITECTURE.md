@@ -25,8 +25,8 @@ src/
   app/
     App.tsx             composition and layout only
     types.ts            every domain type, with the reasoning on it
-    state/              one hook per domain — where mutations live
-    screens/            the two big screens' JSX
+    state/              one hook per domain — where every mutation lives
+    screens/            one file per screen: what is shown, not what it does
     components/         shared presentational pieces
     lib/                pure domain logic; no React except history/navigation
     analytics/          the reporting layer, and its own screens
@@ -48,6 +48,7 @@ src-tauri/src/
   print.rs              raw printing
 docs/                   this directory
 metrics.check.ts        hand-computed checks for the analytics
+smoke.check.mjs         a scripted run through the till, for refactors
 ```
 
 ---
@@ -128,20 +129,22 @@ application data, and no server state.
 Each returns `{ state, actions }`. Each records its own undo entries through
 `useHistory()` (ADR-004 and ADR-011).
 
-Three cross-cutting pieces sit outside the hooks, in `App.tsx`, because more
-than one hook needs them:
+Three cross-cutting pieces sit outside the domain hooks, in `state/core.ts` and
+`lib/history.tsx`, because more than one hook needs them:
 
-**The snapshot ref.** `dataSnapshotRef` holds the latest value of every piece of
-domain state, updated in an effect on every change. Handlers read from it rather
-than from their own closures. This is not an optimisation — it is correctness.
-Two orders can be rung up inside a single React tick, and a handler reading
-`tradingSessions` from a stale closure would hand both of them the same ticket
-number, which is the one thing session numbering exists to prevent. The same
-applies to `tradingSessionsRef` and `grillCapacityRef`, both assigned during
-render.
+**The snapshot ref.** `StateCore.snapshot`, created by `useDataCore` and filled
+in by `useDataPersistence`, holds the latest value of every piece of domain
+state, updated in an effect on every change. Handlers read from it rather than
+from their own closures. This is not an optimisation — it is correctness. Two
+orders can be rung up inside a single React tick, and a handler reading the
+session list from a stale closure would hand both of them the same ticket
+number, which is the one thing session numbering exists to prevent. Two smaller
+refs work the same way and are assigned during render rather than in an effect,
+because they are read from event handlers that can fire before a commit:
+`sessionsRef` in `useSessions` and `grillCapacityRef` in `useSettings`.
 
-**The save coordinator.** One `saveImmediate(override?)`, which every hook
-calls. Several handlers write more than one table in a single action — voiding
+**The save coordinator.** One `saveImmediate(override?)`, on `StateCore`, which
+every hook calls. Several handlers write more than one table in a single action — voiding
 an order touches `orders`, the order counter and the stock ledger — and letting
 each hook save independently produces partial writes. A debounced background
 save runs alongside it, writing the whole snapshot rather than a hand-listed
@@ -150,9 +153,15 @@ subset, because that list had already drifted once.
 **Undo.** `HistoryProvider` in `lib/history.tsx` is a context, mounted above
 `AppInner`, holding one stack shared by every domain.
 
-Screen-local state — which tab, which period, whether the grill is collapsed —
-lives in the screen. `lib/screenState.ts`'s `useStickyState` persists the small
+Screen-local state — which tab, which period, whether the grill is collapsed,
+whether the parked sidebar is open — lives in the screen that draws it, under
+`src/app/screens/`. `lib/screenState.ts`'s `useStickyState` persists the small
 amount of it that should survive navigating away and back.
+
+The screens take hook *handles* rather than three dozen individual props. These
+are the app's own screens rather than reusable components, and a `SettingsScreen`
+that receives `menu` and `settings` is easier to read and harder to miswire than
+one that receives forty callbacks.
 
 ---
 

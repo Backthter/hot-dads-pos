@@ -118,10 +118,10 @@ re-priced at the later period's costs each time the screen is opened.
   carries a cost is never restated, including on the edit path.
 - `src/app/analytics/metrics.ts` — `foodCost`'s theoretical figure is the sum of
   the frozen line costs (`totals.cogs`), never a fresh recipe lookup.
-- `src/app/lib/inventory.ts` — `ledgerValueAt`'s neighbouring comment records
-  the one place today's cost is deliberately used for a historical level, and
-  why: so that this figure and the inventory value on the same screen do not
-  disagree about what a kilo of mince is worth.
+- `src/app/analytics/metrics.ts` — `ledgerValueAt`'s neighbouring comment
+  records the one place today's cost is deliberately used for a historical
+  level, and why: so that this figure and the inventory value on the same screen
+  do not disagree about what a kilo of mince is worth.
 
 ---
 
@@ -145,7 +145,7 @@ all, and are correctly excluded rather than guessed into one.
 
 - `src/app/types.ts` — `Order.sessionId` and `Order.sessionTicket`.
 - `src/db/schema.ts` — `orders.session_id`, with the same note.
-- `src/app/state/useOrders.ts` — `claimSessionTicket` stamps both at checkout,
+- `src/app/state/useSessions.ts` — `claimTicket` stamps both at checkout,
   reading the counter from a ref so two orders rung up in one React tick cannot
   be handed the same number.
 - `src/app/state/useOrders.ts` — `commitEdit` carries `sessionId` and
