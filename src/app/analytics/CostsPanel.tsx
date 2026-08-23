@@ -197,7 +197,14 @@ export function CostsPanel({
                 <button
                   key={b}
                   type="button"
-                  onClick={() => { setBasis(b); setError(''); }}
+                  onClick={() => {
+                    setBasis(b);
+                    setError('');
+                    // The session that was picked is not on offer under
+                    // per-event, and leaving it selected would show a control
+                    // whose value is not one of its options.
+                    if (b === 'per-event' && !target.startsWith('event:')) setTarget('');
+                  }}
                   data-cost-basis={b}
                   className="flex flex-col items-start gap-[2px] px-[11px] py-[9px] rounded-[10px] border text-left transition-colors duration-150"
                   style={{
