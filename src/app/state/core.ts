@@ -100,7 +100,7 @@ export function useDataPersistence(
     // The dependency list is the snapshot's fields rather than the object,
     // which is rebuilt on every render.
   }, [
-    snapshot, current,
+    snapshot,
     current.menuItems, current.categories, current.orders, current.parkedSessions,
     current.stockItems, current.stockAssignments, current.stockMovements,
     current.inventorySnapshots, current.oversellEvents, current.orderCounter,
