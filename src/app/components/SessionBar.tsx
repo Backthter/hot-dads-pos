@@ -6,7 +6,7 @@ import {
 import {
   eventGroups, resumableSessions, sessionTradingHours,
 } from '../lib/sessions';
-import { Button, HINT, SECTION_COLOR, Tooltip, capitalizeFirst } from '../ui';
+import { Button, HINT, SECTION_COLOR, Tooltip, capitalizeFirst, useNow } from '../ui';
 import type { Order, TradingEvent, TradingSession } from '../types';
 
 /**
@@ -53,7 +53,20 @@ export function SessionBar(props: SessionBarProps) {
     [orders, live],
   );
 
-  const hours = live ? sessionTradingHours(live, Date.now()) : 0;
+  /**
+   * The bar's whole job is to say how long the session has actually traded, and
+   * it was reading the clock once per render — so the figure sat still until
+   * something unrelated happened to re-render the bar, typically the next
+   * order. Half an hour of trading could pass without the number moving.
+   *
+   * 30s is ample: the figure is shown to one decimal place, so it cannot move
+   * more often than every six minutes. When nothing is live there is no elapsed
+   * time to report, and the request drops to something long enough to be
+   * invisible — the clock is shared, so this costs no timer of its own either
+   * way.
+   */
+  const now = useNow(live ? 30_000 : 3_600_000);
+  const hours = live ? sessionTradingHours(live, now) : 0;
 
   return (
     <>

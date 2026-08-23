@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   AlertTriangle, BarChart3, ChevronLeft, ChevronRight, Clock, Coins, Search, ShoppingBag, Timer,
@@ -8,7 +8,7 @@ import {
 } from './AnalyticsUI';
 import { NavActions, NavSlot, NavTab, NavTabs } from '../components/Navigation';
 import { useStickyState } from '../lib/screenState';
-import { IconButton, SegmentedControl, Toggle, Tooltip, useReducedMotion, useSection } from '../ui';
+import { IconButton, SegmentedControl, Toggle, Tooltip, useNow, useReducedMotion, useSection } from '../ui';
 import { useTabStep } from '../lib/navigation';
 import { LockedRevenue } from './RevenueLock';
 import { OrdersExplorer } from './OrdersExplorer';
@@ -24,7 +24,7 @@ import {
   stockoutStats, throughput, totalsFor, tradingHours, voidStats,
 } from './metrics';
 import { eventGroups } from '../lib/sessions';
-import type { ItemBreakEven } from './metrics';
+import type { DateRange, ItemBreakEven } from './metrics';
 import type {
   CostEntry, CostKind, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
   OversellEvent, StockItem, StockMovement, TradingEvent, TradingSession,
@@ -61,6 +61,56 @@ export interface AnalyticsViewProps {
 const minutes = (ms: number | null) => (ms === null ? '—' : `${Math.round(ms / 60000)} min`);
 const pct = (n: number) => `${n.toFixed(1)}%`;
 
+/** One shared empty array, so "no previous period" is a stable reference. */
+const EMPTY_ORDERS: Order[] = [];
+
+/**
+ * Holds a list steady while its contents are unchanged.
+ *
+ * The scope is re-resolved on every clock tick, and it builds fresh arrays each
+ * time — so a screen full of `useMemo` keyed on those arrays would recompute
+ * everything every few seconds, including the two or three things on it that
+ * are genuinely expensive and have nothing to do with the time.
+ *
+ * The comparison is by reference, element by element. Every list here is
+ * derived by filtering the same underlying rows, so an element that has not
+ * changed is the same object; a deep comparison would cost more than the
+ * recomputation it saves.
+ */
+function useStableList<T>(next: readonly T[]): T[] {
+  const held = useRef(next as T[]);
+  const previous = held.current;
+  if (previous !== next && !sameMembers(previous, next)) {
+    held.current = next as T[];
+  }
+  return held.current;
+}
+
+function sameMembers<T>(a: readonly T[], b: readonly T[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * The same idea for the date window, which is three primitives in a fresh
+ * object. A "Today" range is rebuilt on every tick and is identical all day.
+ */
+function useStableRange(next: DateRange): DateRange {
+  const held = useRef(next);
+  const previous = held.current;
+  if (
+    previous.start !== next.start
+    || previous.end !== next.end
+    || previous.label !== next.label
+  ) {
+    held.current = next;
+  }
+  return held.current;
+}
+
 export function AnalyticsView(props: AnalyticsViewProps) {
   const {
     orders, menuItems, stockItems, assignments, movements, snapshots, oversells,
@@ -76,43 +126,79 @@ export function AnalyticsView(props: AnalyticsViewProps) {
   // rather than leaving the section outright.
   const setTab = useTabStep(tab, setTabRaw, t => TAB_LABEL[t]);
 
-  const resolved = useMemo(
-    () => resolveScope(scope, { orders, costs, sessions, events }),
-    [scope, orders, costs, sessions, events],
-  );
-  const { range } = resolved;
+  /**
+   * The clock this screen reads from.
+   *
+   * Faster while a service is running, because that is when somebody is
+   * standing at the till watching revenue per trading hour move. Slower
+   * otherwise: nothing on a screen looking at last month changes faster than
+   * the orders behind it, and every tick costs a recomputation of the figures
+   * that genuinely depend on the time.
+   */
+  const sessionIsLive = sessions.some(s => s.status === 'active');
+  const now = useNow(sessionIsLive ? 5_000 : 30_000);
 
-  const current = useMemo(() => totalsFor(resolved.orders), [resolved.orders]);
-  const prior = useMemo(
-    () => totalsFor(resolved.previous?.orders ?? []), [resolved.previous]);
+  const resolved = useMemo(
+    () => resolveScope(scope, { orders, costs, sessions, events, now }),
+    [scope, orders, costs, sessions, events, now],
+  );
+
+  /*
+   * `resolveScope` builds a fresh range object and a fresh order list every
+   * time it runs, so with `now` in its dependencies their *identity* changes on
+   * every tick even when neither has actually moved. Nearly everything below
+   * keys on identity, and most of it does not depend on the current time at all
+   * — the item and category tables least of all, and they are the two most
+   * expensive things on the screen.
+   *
+   * So the scope's outputs are held steady by value before anything else reads
+   * them. A tick then recomputes the figures that are genuinely live and
+   * nothing else, which is the whole point of having a clock rather than a
+   * re-render.
+   */
+  const range = useStableRange(resolved.range);
+  const scopedOrders = useStableList(resolved.orders);
+  const scopedEntries = useStableList(resolved.costs);
+  const scopedSessions = useStableList(resolved.sessions);
+  const priorOrders = useStableList(resolved.previous?.orders ?? EMPTY_ORDERS);
+
+  const current = useMemo(() => totalsFor(scopedOrders), [scopedOrders]);
+  const prior = useMemo(() => totalsFor(priorOrders), [priorOrders]);
 
   // Item and category tables read from the scoped orders, but still take a range
   // because deals and discounts are resolved per order and the helpers filter
   // by it. For a session scope the range is the session's own span, so the two
   // agree by construction.
+  //
+  // Neither depends on the current time, so neither takes `now`. Adding it here
+  // would rebuild both tables on every tick to produce the same answer.
   const items = useMemo(
-    () => itemPerformance(resolved.orders, menuItems, range), [resolved.orders, menuItems, range]);
+    () => itemPerformance(scopedOrders, menuItems, range), [scopedOrders, menuItems, range]);
   const categories = useMemo(() => categoryPerformance(items), [items]);
   const buckets = useMemo(
-    () => bucketsFor(resolved.orders, range, grainFor(range)), [resolved.orders, range]);
-  const hours = useMemo(() => tradingHours(resolved.orders, range), [resolved.orders, range]);
-  const tp = useMemo(() => throughput(resolved.orders, range), [resolved.orders, range]);
-  const bands = useMemo(() => queueBands(resolved.orders, range), [resolved.orders, range]);
+    () => bucketsFor(scopedOrders, range, grainFor(range)), [scopedOrders, range]);
+  const hours = useMemo(() => tradingHours(scopedOrders, range), [scopedOrders, range]);
+  const tp = useMemo(() => throughput(scopedOrders, range), [scopedOrders, range]);
+  const bands = useMemo(() => queueBands(scopedOrders, range), [scopedOrders, range]);
   const stock = useMemo(() => inventoryValue(stockItems), [stockItems]);
   const shrink = useMemo(
     () => shrinkageValue(movements, stockItems, range), [movements, stockItems, range]);
+  // Live: a period running up to now closes on the shelf itself, and whether
+  // the period is still open is decided against `now`.
   const food = useMemo(
-    () => foodCost(current, movements, snapshots, stockItems, range),
-    [current, movements, snapshots, stockItems, range]);
+    () => foodCost(current, movements, snapshots, stockItems, range, now),
+    [current, movements, snapshots, stockItems, range, now]);
   const issues = useMemo(
-    () => dataQuality(resolved.orders, stockItems, assignments, menuItems, range, food),
-    [resolved.orders, stockItems, assignments, menuItems, range, food]);
+    () => dataQuality(scopedOrders, stockItems, assignments, menuItems, range, food),
+    [scopedOrders, stockItems, assignments, menuItems, range, food]);
 
   const groups = useMemo(() => eventGroups(events, sessions), [events, sessions]);
+  // Both carry a trading-hours figure taken from the session clock, which runs
+  // while a session is live.
   const byEvent = useMemo(
-    () => eventPerformance(orders, groups).slice(-14), [orders, groups]);
+    () => eventPerformance(orders, groups, now).slice(-14), [orders, groups, now]);
   const bySession = useMemo(
-    () => sessionPerformance(orders, resolved.sessions), [orders, resolved.sessions]);
+    () => sessionPerformance(orders, scopedSessions, now), [orders, scopedSessions, now]);
 
   /**
    * Counting stock bought before the period started.
@@ -137,17 +223,19 @@ export function AnalyticsView(props: AnalyticsViewProps) {
       .filter(g => g.sessions.length > 0)
       .sort((a, b) => a.startedAt - b.startedAt);
     const index = ordered.findIndex(g => g.sessions.some(
-      member => resolved.sessions.some(inScope => inScope.id === member.id)));
+      member => scopedSessions.some(inScope => inScope.id === member.id)));
     const previous = index > 0 ? ordered[index - 1] : null;
     // From the end of the last trading you did, or from the very beginning if
     // this is the first — anything earlier belongs to a period already reported.
     const from = previous?.endedAt ?? 0;
     if (from >= range.start) return 0;
     return stockPurchasesValue(movements, stockItems, from, range.start);
-  }, [includeEarlierStock, resolved, groups, movements, stockItems, range.start]);
+    // Keyed on the fields actually read rather than on `resolved` itself, whose
+    // identity changes on every clock tick.
+  }, [includeEarlierStock, resolved.sessionScoped, scopedSessions, groups, movements, stockItems, range.start]);
 
   const scopedCosts = useMemo(() => {
-    const base = costSummary(resolved.costs);
+    const base = costSummary(scopedEntries);
     if (earlierStockCost <= 0) return base;
     return {
       ...base,
@@ -155,16 +243,21 @@ export function AnalyticsView(props: AnalyticsViewProps) {
       total: base.total + earlierStockCost,
       entries: base.entries + 1,
     };
-  }, [resolved.costs, earlierStockCost]);
+  }, [scopedEntries, earlierStockCost]);
   const be = useMemo(() => breakEven(current, scopedCosts), [current, scopedCosts]);
   const beByItem = useMemo(
     () => breakEvenByItem(items, scopedCosts, current), [items, scopedCosts, current]);
-  const voids = useMemo(() => voidStats(resolved.orders), [resolved.orders]);
+  const voids = useMemo(() => voidStats(scopedOrders), [scopedOrders]);
   const pairs = useMemo(
-    () => attachmentPairs(resolved.orders, menuItems, range).slice(0, 8),
-    [resolved.orders, menuItems, range]);
+    () => attachmentPairs(scopedOrders, menuItems, range).slice(0, 8),
+    [scopedOrders, menuItems, range]);
   const trendPoints = useMemo(
-    () => trendBuckets(resolved, sessions, events), [resolved, sessions, events]);
+    () => trendBuckets(resolved, sessions, events),
+    // `trendBuckets` reads only these three fields of the resolved scope, and
+    // none of them is a clock. Keying on the whole object would rebuild the
+    // popularity trend — which walks every order ever taken — on every tick.
+    [resolved.sessionScoped, scopedSessions, range, sessions, events],
+  );
   const trend = useMemo(
     () => popularityTrend(orders, menuItems, trendPoints), [orders, menuItems, trendPoints]);
   const stockouts = useMemo(
@@ -173,7 +266,9 @@ export function AnalyticsView(props: AnalyticsViewProps) {
   const turnover = useMemo(
     () => inventoryTurnover(current, snapshots, stockItems, range),
     [current, snapshots, stockItems, range]);
-  const dead = useMemo(() => deadStock(stockItems, movements), [stockItems, movements]);
+  // Idle days are measured from now, so a screen left open overnight has to
+  // move. Cheap enough to take the tick: one pass over the ledger.
+  const dead = useMemo(() => deadStock(stockItems, movements, now), [stockItems, movements, now]);
 
   const revenuePerHour = resolved.tradingHours > 0
     ? current.netRevenue / resolved.tradingHours : null;
@@ -678,7 +773,7 @@ export function AnalyticsView(props: AnalyticsViewProps) {
                   onAdd={props.onAddCost}
                   onDelete={props.onDeleteCost}
                   scopeLabel={resolved.label}
-                  scopedCosts={resolved.costs}
+                  scopedCosts={scopedEntries}
                 />
               </Screen>
             )}

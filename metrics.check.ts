@@ -12,6 +12,7 @@ import {
 import {
   endSession, pauseSession, resumeSession, sessionTradingHours, startSession,
 } from './src/app/lib/sessions';
+import { resolveScope } from './src/app/analytics/scope';
 import {
   categoryIndex, matchesSearch, parseSearch, searchHaystack, sessionIndex,
 } from './src/app/analytics/search';
@@ -271,6 +272,54 @@ s = endSession(s, T + 20 * HOUR);
 check('trading hours exclude the pause', sessionTradingHours(s, T + 20 * HOUR), 8);
 check('paused time is banked', s.pausedMs / HOUR, 12);
 check('ticket counter untouched by pausing', s.ticketCounter, 0);
+
+/* ----------------------------------------------------- the clock is a value */
+// A live session's trading hours are a function of the moment they are read
+// at, and every call site now passes that moment in rather than reaching for
+// Date.now() itself. Read the same session an hour later and the figure must
+// have moved by an hour — that is precisely what was broken: the time was
+// captured once when the screen opened, was in no dependency array, and so
+// never advanced while a service ran.
+console.log('\nLive session clock');
+const running = startSession([], T, 'Live');
+const twoHoursIn = sessionTradingHours(running, T + 2 * HOUR);
+const threeHoursIn = sessionTradingHours(running, T + 3 * HOUR);
+check('two hours in', twoHoursIn, 2);
+check('an hour later', threeHoursIn, 3);
+check('the figure moved', threeHoursIn - twoHoursIn, 1);
+
+// A paused session's clock does not move, however far `now` advances. Pausing
+// banks the moment, which is what keeps a night between two market days out of
+// revenue per trading hour.
+const held = pauseSession(running, T + 2 * HOUR);
+check('paused at two hours', sessionTradingHours(held, T + 2 * HOUR), 2);
+check('and still two an hour later', sessionTradingHours(held, T + 3 * HOUR), 2);
+
+// The same holds one layer up. `resolveScope` used to default `now` to
+// Date.now(), so a session scope's trading hours and its resolved window were
+// both frozen at whatever time the screen was opened.
+const scopeAt = (at: number) => resolveScope(
+  { kind: 'session', id: running.id },
+  { orders: [], costs: [], sessions: [running], events: [], now: at },
+);
+check('scope hours at T+2h', scopeAt(T + 2 * HOUR).tradingHours, 2);
+check('scope hours at T+3h', scopeAt(T + 3 * HOUR).tradingHours, 3);
+// A running session has no end but the moment it is being read at, so the
+// window it resolves to grows with the clock.
+check(
+  'the window follows the clock',
+  scopeAt(T + 3 * HOUR).range.end - scopeAt(T + 2 * HOUR).range.end,
+  HOUR,
+);
+
+// And a date preset is a function of the clock too — "Today" is a different
+// window tomorrow, which a frozen `now` could never notice.
+check(
+  'today moves on',
+  resolveRange('today', undefined, T + 24 * HOUR).start
+    > resolveRange('today', undefined, T).start,
+  true,
+);
 
 /* ---------------------------------------------------------------- search */
 console.log('\nSearch grammar');
