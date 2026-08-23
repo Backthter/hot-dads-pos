@@ -21,22 +21,67 @@ pub struct SyncConfig {
     pub connection_string: String,
 }
 
-const SYNC_TABLES: &[&str] = &[
-    "menu_items",
-    "app_categories",
+/// How a table's rows are written when they arrive from the other side.
+///
+/// This is a property of the table, not of the sync run, because the two kinds
+/// of table mean different things by "the other device has a copy of this row".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WriteStrategy {
+    /// Current-state tables. The row is the latest version of a mutable thing,
+    /// so the incoming copy wins and rows that have gone are cleared first.
+    /// This is what every table did before the strategy was made per-table.
+    Replace,
+    /// Append-only logs. Rows are immutable once written and nothing ever
+    /// deletes one, so the two copies converge by union: never cleared, never
+    /// replaced, and a stale copy from a lagging device cannot overwrite or
+    /// remove a good row. See docs/03-INVARIANTS.md, invariant 1.
+    Append,
+}
+
+struct SyncTable {
+    name: &'static str,
+    strategy: WriteStrategy,
+}
+
+const fn replace(name: &'static str) -> SyncTable {
+    SyncTable { name, strategy: WriteStrategy::Replace }
+}
+
+const fn append(name: &'static str) -> SyncTable {
+    SyncTable { name, strategy: WriteStrategy::Append }
+}
+
+/// What replicates, in dependency order.
+///
+/// Order matters. These rows carry foreign keys that are not declared as
+/// constraints, so nothing stops a child arriving before its parent — it simply
+/// points at nothing afterwards, silently.
+const SYNC_TABLES: &[SyncTable] = &[
+    replace("menu_items"),
+    replace("app_categories"),
     // Sessions before orders: orders carry a session_id, and a till that syncs
     // the orders without the sessions shows tickets pointing at nothing, with
     // every session-scoped figure silently empty.
-    "trading_events",
-    "trading_sessions",
-    "cost_entries",
-    "orders",
-    "order_items",
-    "parked_sessions",
-    "parked_session_cart_items",
-    "stock_items",
-    "stock_assignments",
-    "app_state",
+    replace("trading_events"),
+    replace("trading_sessions"),
+    replace("cost_entries"),
+    replace("orders"),
+    replace("order_items"),
+    replace("parked_sessions"),
+    replace("parked_session_cart_items"),
+    // Stock items before the ledger and the recipes, both of which reference
+    // them by id.
+    replace("stock_items"),
+    // The ledger. Without it a synced device receives stock *levels* but not
+    // the movements that produced them, so food cost, purchases, shrinkage,
+    // turnover, dead stock and consumption rate are all wrong or empty on any
+    // device that was not the one doing the stocking.
+    append("stock_movements"),
+    replace("stock_assignments"),
+    // Nothing references these two, so they go last.
+    append("inventory_snapshots"),
+    append("oversell_events"),
+    replace("app_state"),
 ];
 
 fn parse_connection_string(s: &str) -> Result<(String, u16, String, String), String> {
@@ -338,8 +383,19 @@ fn escape_sql_string(s: &str) -> String {
     s.replace('\'', "''")
 }
 
+/// `INSERT OR REPLACE` for current-state tables, `INSERT OR IGNORE` for the
+/// append-only ones — the row is already there and is immutable, so the
+/// incoming copy has nothing to add and must not overwrite it.
+fn insert_verb(strategy: WriteStrategy) -> &'static str {
+    match strategy {
+        WriteStrategy::Replace => "INSERT OR REPLACE",
+        WriteStrategy::Append => "INSERT OR IGNORE",
+    }
+}
+
 fn row_to_insert_sql(
     table: &str,
+    strategy: WriteStrategy,
     columns: &[String],
     row: &[serde_json::Value],
 ) -> String {
@@ -365,7 +421,8 @@ fn row_to_insert_sql(
         .collect();
 
     format!(
-        "INSERT OR REPLACE INTO [{}] ({}) VALUES ({});",
+        "{} INTO [{}] ({}) VALUES ({});",
+        insert_verb(strategy),
         table,
         col_list,
         vals.join(", ")
@@ -374,7 +431,8 @@ fn row_to_insert_sql(
 
 fn collect_upload_data(conn: &Connection) -> Result<(Vec<(String, String)>, Vec<(String, Vec<String>, u64)>), String> {
     let mut creates = Vec::new();
-    for table in SYNC_TABLES {
+    for entry in SYNC_TABLES {
+        let table = entry.name;
         let ddl: String = conn
             .query_row(
                 &format!("SELECT sql FROM sqlite_master WHERE type='table' AND name='{table}'"),
@@ -387,7 +445,8 @@ fn collect_upload_data(conn: &Connection) -> Result<(Vec<(String, String)>, Vec<
     }
 
     let mut table_data = Vec::new();
-    for table in SYNC_TABLES {
+    for entry in SYNC_TABLES {
+        let table = entry.name;
         let columns = get_table_columns(conn, table)?;
         if columns.is_empty() {
             continue;
@@ -398,7 +457,7 @@ fn collect_upload_data(conn: &Connection) -> Result<(Vec<(String, String)>, Vec<
         }
         let mut statements = Vec::new();
         for row in &rows {
-            statements.push(row_to_insert_sql(table, &columns, row));
+            statements.push(row_to_insert_sql(table, entry.strategy, &columns, row));
         }
         table_data.push((table.to_string(), statements, rows.len() as u64));
     }
@@ -434,6 +493,20 @@ async fn send_upload_to_cloud(
     Ok(format!("Uploaded {total_rows} rows{table_info}"))
 }
 
+/// The strategy declared for a table in `SYNC_TABLES`.
+///
+/// Defaults to `Replace` for a name that is not in the list, which is the
+/// behaviour every table had before strategies existed. Nothing outside the
+/// list is ever passed here in practice — the responses being written back are
+/// built from `SYNC_TABLES` in the first place.
+fn strategy_for(table: &str) -> WriteStrategy {
+    SYNC_TABLES
+        .iter()
+        .find(|t| t.name == table)
+        .map(|t| t.strategy)
+        .unwrap_or(WriteStrategy::Replace)
+}
+
 fn write_cloud_data_to_local(conn: &Connection, table_responses: &[(String, Vec<serde_json::Value>, Vec<String>)]) -> Result<(u64, Vec<String>), String> {
     let mut total_rows = 0u64;
     let mut details = Vec::new();
@@ -442,9 +515,19 @@ fn write_cloud_data_to_local(conn: &Connection, table_responses: &[(String, Vec<
             continue;
         }
 
+        let strategy = strategy_for(table);
         let col_names: Vec<String> = columns.iter().map(|c| format!("[{}]", c)).collect();
-        conn.execute(&format!("DELETE FROM [{}]", table), [])
-            .map_err(|e| format!("Failed to clear {table}: {e}"))?;
+
+        // Clearing first is how a current-state table takes the cloud copy as
+        // authoritative. An append-only table must not be cleared: its rows are
+        // immutable and nothing deletes one, so a download from a device that
+        // has not seen today's movements would otherwise wipe them. Merging by
+        // union is the correct semantics for an immutable log, and it needs no
+        // conflict resolution.
+        if strategy == WriteStrategy::Replace {
+            conn.execute(&format!("DELETE FROM [{}]", table), [])
+                .map_err(|e| format!("Failed to clear {table}: {e}"))?;
+        }
 
         for row_val in rows {
             let obj = row_val
@@ -473,7 +556,8 @@ fn write_cloud_data_to_local(conn: &Connection, table_responses: &[(String, Vec<
 
             let col_list = col_names.join(", ");
             let sql = format!(
-                "INSERT OR REPLACE INTO [{}] ({}) VALUES ({});",
+                "{} INTO [{}] ({}) VALUES ({});",
+                insert_verb(strategy),
                 table,
                 col_list,
                 vals.join(", ")
@@ -492,8 +576,8 @@ fn write_cloud_data_to_local(conn: &Connection, table_responses: &[(String, Vec<
 fn get_all_columns(conn: &Connection) -> Vec<(String, Vec<String>)> {
     SYNC_TABLES.iter()
         .map(|t| {
-            let cols = get_table_columns(conn, t).unwrap_or_default();
-            (t.to_string(), cols)
+            let cols = get_table_columns(conn, t.name).unwrap_or_default();
+            (t.name.to_string(), cols)
         })
         .filter(|(_, cols)| !cols.is_empty())
         .collect()
@@ -602,7 +686,8 @@ pub async fn sync_now(state: tauri::State<'_, SyncState>) -> Result<String, Stri
     let conn = open_conn(&db_path, &ext_path)?;
 
     let mut local_has_data = false;
-    for table in SYNC_TABLES {
+    for entry in SYNC_TABLES {
+        let table = entry.name;
         let count: i64 = conn
             .query_row(&format!("SELECT COUNT(*) FROM [{table}]"), [], |row| row.get(0))
             .unwrap_or(0);
@@ -712,7 +797,8 @@ pub fn sync_has_unsent_changes(state: tauri::State<SyncState>) -> Result<bool, S
     match last {
         None => {
             // Never synced — show pending if there's any local data
-            for table in SYNC_TABLES {
+            for entry in SYNC_TABLES {
+                let table = entry.name;
                 let count: i64 = conn
                     .query_row(&format!("SELECT COUNT(*) FROM [{table}]"), [], |row| row.get(0))
                     .unwrap_or(0);
@@ -749,4 +835,76 @@ pub fn sync_get_version(_state: tauri::State<SyncState>) -> Result<String, Strin
 #[tauri::command]
 pub fn sync_is_connected(state: tauri::State<SyncState>) -> bool {
     state.config.lock().unwrap().is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn position(name: &str) -> usize {
+        SYNC_TABLES
+            .iter()
+            .position(|t| t.name == name)
+            .unwrap_or_else(|| panic!("{name} is not in SYNC_TABLES"))
+    }
+
+    /// Rows carry foreign keys that are not declared as constraints, so nothing
+    /// stops a child arriving before its parent — it simply points at nothing
+    /// afterwards, silently. The order is a rule, not a preference.
+    #[test]
+    fn parents_replicate_before_their_children() {
+        assert!(position("trading_sessions") < position("orders"));
+        assert!(position("orders") < position("order_items"));
+        assert!(position("parked_sessions") < position("parked_session_cart_items"));
+        assert!(position("stock_items") < position("stock_movements"));
+        assert!(position("stock_items") < position("stock_assignments"));
+        assert!(position("stock_movements") < position("stock_assignments"));
+        assert!(position("stock_assignments") < position("inventory_snapshots"));
+        assert!(position("inventory_snapshots") < position("oversell_events"));
+    }
+
+    /// The ledger and the two logs beside it are append-only. Replacing or
+    /// clearing them would let a lagging device destroy rows it has not seen —
+    /// see docs/03-INVARIANTS.md, invariant 1.
+    #[test]
+    fn append_only_tables_are_declared_append_only() {
+        for name in ["stock_movements", "inventory_snapshots", "oversell_events"] {
+            assert_eq!(
+                strategy_for(name),
+                WriteStrategy::Append,
+                "{name} must stay append-only",
+            );
+        }
+    }
+
+    /// Everything that was replicated before this change keeps replicating
+    /// exactly as it did. The strategy is new; their behaviour is not.
+    #[test]
+    fn state_tables_keep_replacing() {
+        for name in [
+            "menu_items", "app_categories", "trading_events", "trading_sessions",
+            "cost_entries", "orders", "order_items", "parked_sessions",
+            "parked_session_cart_items", "stock_items", "stock_assignments", "app_state",
+        ] {
+            assert_eq!(strategy_for(name), WriteStrategy::Replace, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_verb_follows_the_strategy() {
+        let columns = vec!["id".to_string(), "delta".to_string(), "note".to_string()];
+        let row = vec![
+            serde_json::Value::String("m'1".to_string()),
+            serde_json::json!(-2.5),
+            serde_json::Value::Null,
+        ];
+        assert_eq!(
+            row_to_insert_sql("stock_movements", WriteStrategy::Append, &columns, &row),
+            "INSERT OR IGNORE INTO [stock_movements] ([id], [delta], [note]) VALUES ('m''1', -2.5, NULL);",
+        );
+        assert_eq!(
+            row_to_insert_sql("orders", WriteStrategy::Replace, &columns, &row),
+            "INSERT OR REPLACE INTO [orders] ([id], [delta], [note]) VALUES ('m''1', -2.5, NULL);",
+        );
+    }
 }
