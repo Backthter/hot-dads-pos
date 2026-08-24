@@ -18,14 +18,17 @@ import {
 import {
   COST_ENTRY_COLUMNS, costEntryFromRow, costEntryToRow,
 } from './src/db/costEntryRows';
-import { resolveScope } from './src/app/analytics/scope';
+import { resolveScope, type Scope } from './src/app/analytics/scope';
+import {
+  DEFAULT_TAB, TABS, lockFor, migrateTabId, resolveLock, type HistorySource,
+} from './src/app/analytics/tabs/model';
 import {
   categoryIndex, matchesSearch, parseSearch, searchHaystack, sessionIndex,
 } from './src/app/analytics/search';
 import type { CostSummary } from './src/app/analytics/metrics';
 import type {
   CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
-  OversellEvent, StockItem, StockMovement,
+  OversellEvent, StockItem, StockMovement, TradingEvent, TradingSession,
 } from './src/app/types';
 
 let failures = 0;
@@ -748,6 +751,109 @@ check('event and payment together', matchesSearch(hay, parseSearch('winter, cash
 check('event and the wrong payment', matchesSearch(hay, parseSearch('winter, transfer')), false);
 check('either side of a slash', matchesSearch(hay, parseSearch('summer/winter')), true);
 check('category still matches', matchesSearch(hay, parseSearch('food')), true);
+
+/* ------------------------------------------------- per-event availability */
+// ADR-018. `per-event` needs an event id to attach to. A lone session is shown
+// as an event of one and has none, so offering the basis there produced an
+// amount belonging to nothing — 1A-ii's bug 2. The fix is not to offer it, and
+// the decision is made by the resolver so that the form and the figures cannot
+// disagree about the same market.
+console.log('\nPer-event availability');
+
+const lone: TradingSession = {
+  id: 'lone', name: 'Saturday', status: 'ended', startedAt: T, endedAt: T + 4 * HOUR,
+  ticketCounter: 3, pausedMs: 0,
+};
+const dayOne: TradingSession = {
+  id: 'day1', name: 'Friday', status: 'ended', startedAt: T, endedAt: T + 4 * HOUR,
+  ticketCounter: 3, pausedMs: 0, eventId: 'winter',
+};
+const dayTwo: TradingSession = {
+  id: 'day2', name: 'Saturday', status: 'ended', startedAt: T + 24 * HOUR,
+  endedAt: T + 28 * HOUR, ticketCounter: 3, pausedMs: 0, eventId: 'winter',
+};
+const winter: TradingEvent = { id: 'winter', name: 'Winter Market', createdAt: T };
+
+const scopeOf = (scope: Scope, sessions: TradingSession[], events: TradingEvent[]) =>
+  resolveScope(scope, { orders: [], costs: [], sessions, events, now: T + 100 * HOUR });
+
+// A session that belongs to no event. The group it resolves to is a stand-in,
+// so there is no id and the basis is refused rather than offered and rejected.
+const loneScope = scopeOf({ kind: 'session', id: 'lone' }, [lone], []);
+check('a lone session offers no per-event', loneScope.perEvent.available, false);
+check('and says why', typeof loneScope.perEvent.reason === 'string', true);
+check('and resolves to no event id', loneScope.eventId, undefined);
+
+// One day of a real market. The event exists, so the pitch fee has somewhere
+// to go — and it is the same id `costsOf` was given.
+const dayScope = scopeOf({ kind: 'session', id: 'day1' }, [dayOne, dayTwo], [winter]);
+check('a grouped session offers per-event', dayScope.perEvent.available, true);
+check('with no reason to give', dayScope.perEvent.reason, undefined);
+check('and carries the event id', dayScope.eventId, 'winter');
+
+// The whole market, which is the case the basis was invented for.
+const eventScope = scopeOf({ kind: 'event', id: 'winter' }, [dayOne, dayTwo], [winter]);
+check('an event scope offers per-event', eventScope.perEvent.available, true);
+check('and carries its own id', eventScope.eventId, 'winter');
+
+// A date window belongs to no event, but a cost logged from one is picked up
+// by its timestamp — so what matters is whether a real event exists at all.
+const datedWithout = scopeOf({ kind: 'range', preset: 'all' }, [lone], []);
+check('dates with no events refuse it', datedWithout.perEvent.available, false);
+const datedWith = scopeOf({ kind: 'range', preset: 'all' }, [dayOne, dayTwo], [winter]);
+check('dates with an event allow it', datedWith.perEvent.available, true);
+
+// A session id is not an event id, and must never stand in for one. If this
+// ever passes, something has started inventing an event of one — which would
+// make ADR-013's held-cost distinction meaningless, because the "event" and the
+// session would then be the same period.
+check('a session id never becomes an event id', loneScope.eventId === lone.id, false);
+
+/* ----------------------------------------------------------- the tab set */
+// ADR-019 and the 1C-i tab migration. Both are pure so that they can be held to
+// their word here — the rest of the tab bar is React and invisible to this file.
+console.log('\nTabs, and what the lock hides');
+
+check('an old Overview lands on Finance', migrateTabId('overview'), 'finance');
+check('an old Sales lands on Business', migrateTabId('sales'), 'business');
+check('an old Orders lands on History', migrateTabId('orders'), 'history');
+// Costs is not a tab any more at all — logging a cost is an action on Finance.
+check('an old Costs lands on Finance', migrateTabId('costs'), 'finance');
+check('a current id is left alone', migrateTabId('inventory'), 'inventory');
+check('nonsense falls back to the default', migrateTabId('nope'), DEFAULT_TAB);
+// Every tab that exists survives a round trip, so renaming one without updating
+// the migration fails here rather than silently resetting somebody's screen.
+check('every tab id survives itself', TABS.every(t => migrateTabId(t.id) === t.id), true);
+
+// The table from the phase brief, stated as checks. The partial case is the
+// point: quantities without the PIN, money with it.
+const hides = (tab: Parameters<typeof lockFor>[0], source?: HistorySource) =>
+  resolveLock(lockFor(tab, source), true);
+check('Finance is hidden entirely', hides('finance').hidden, true);
+check('Business is hidden entirely', hides('business').hidden, true);
+check('Inventory is not hidden', hides('inventory').hidden, false);
+check('Inventory hides its money', hides('inventory').moneyHidden, true);
+check('History · Orders stays open', hides('history', 'orders').hidden, false);
+check('History · Stock stays open', hides('history', 'stock').hidden, false);
+check('History · Money is hidden', hides('history', 'money').hidden, true);
+// Nothing is withheld from anyone without a PIN set. The capability is about
+// what the lock covers, not about hiding things in general.
+check(
+  'unlocked hides nothing anywhere',
+  TABS.every(t => {
+    const state = resolveLock(lockFor(t.id), false);
+    return !state.hidden && !state.moneyHidden;
+  }),
+  true,
+);
+// A tab is either replaced or redacted, never both — the two flags are
+// alternatives, and code downstream reads them as such.
+check(
+  'hidden and money-hidden are exclusive',
+  (['all', 'money-columns', 'none'] as const)
+    .every(l => !(resolveLock(l, true).hidden && resolveLock(l, true).moneyHidden)),
+  true,
+);
 
 console.log(`\n${failures === 0 ? 'All checks passed.' : `${failures} check(s) FAILED.`}`);
 process.exit(failures === 0 ? 0 : 1);
