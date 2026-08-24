@@ -50,7 +50,25 @@ export function defaultSessionName(at: number, existing: TradingSession[]): stri
   return sameDay > 0 ? `Session ${sameDay + 1} · ${date}` : `Session · ${date}`;
 }
 
-export function startSession(sessions: TradingSession[], now: number, name?: string): TradingSession {
+/**
+ * A new session, optionally starting straight into an event.
+ *
+ * `eventId` is optional and defaults to nothing, which is the case that matters
+ * most: most days are just days. A picker that demands an answer every morning
+ * is a picker that gets dismissed every morning, and the session then carries
+ * whatever the dismissal meant. The three-day market is the exception, and the
+ * exception is the one worth typing.
+ *
+ * The caller is responsible for the event existing. Nothing here creates one —
+ * a session pointing at an event id with no row behind it is treated as
+ * ungrouped by `eventGroups`, which is the safe reading but not a useful one.
+ */
+export function startSession(
+  sessions: TradingSession[],
+  now: number,
+  name?: string,
+  eventId?: string,
+): TradingSession {
   return {
     id: newSessionId(),
     name: name?.trim() || defaultSessionName(now, sessions),
@@ -58,6 +76,7 @@ export function startSession(sessions: TradingSession[], now: number, name?: str
     startedAt: now,
     ticketCounter: 0,
     pausedMs: 0,
+    ...(eventId ? { eventId } : {}),
   };
 }
 
@@ -110,8 +129,55 @@ export function sessionTradingHours(session: TradingSession, now: number): numbe
 
 /* ------------------------------------------------------------------ events */
 
-export function createEvent(name: string, now: number, notes?: string): TradingEvent {
-  return { id: newEventId(), name: name.trim() || 'Event', notes, createdAt: now };
+/** What an event can be given when it is made, beyond its name. */
+export interface EventDetails {
+  /** A plan, never the record. See the doc comment on `TradingEvent`. */
+  plannedStart?: number;
+  plannedEnd?: number;
+  venue?: string;
+  notes?: string;
+}
+
+export function createEvent(
+  name: string,
+  now: number,
+  details?: EventDetails,
+): TradingEvent {
+  return {
+    id: newEventId(),
+    name: name.trim() || 'Event',
+    createdAt: now,
+    ...(details?.plannedStart !== undefined ? { plannedStart: details.plannedStart } : {}),
+    ...(details?.plannedEnd !== undefined ? { plannedEnd: details.plannedEnd } : {}),
+    ...(details?.venue?.trim() ? { venue: details.venue.trim() } : {}),
+    ...(details?.notes?.trim() ? { notes: details.notes.trim() } : {}),
+  };
+}
+
+/**
+ * Where an event is in its life, worked out from its sessions.
+ *
+ * - `planned` — no sessions. Either it has not started, or its last session was
+ *   taken out of it. Both are things the shop did on purpose.
+ * - `active` — at least one session is active or paused. A paused session is
+ *   mid-market, not finished: a market that stops at dusk and picks up in the
+ *   morning is still running, and calling it ended overnight is the same
+ *   calendar-day mistake invariant 4 was written against.
+ * - `ended` — it has sessions and every one of them has ended.
+ *
+ * **Derived, never stored.** A `status` column on `trading_events` would be a
+ * second source of truth about the same fact, and the first thing that would
+ * break it is somebody resuming a session inside an `ended` event: the sessions
+ * would say active and the column would say ended, with nothing to say which
+ * was right. That is the shape of problem invariant 4 exists to prevent, so the
+ * same answer applies — read it off the rows that actually know.
+ */
+export type EventStatus = 'planned' | 'active' | 'ended';
+
+export function eventStatus(event: TradingEvent, sessions: TradingSession[]): EventStatus {
+  const members = sessions.filter(s => s.eventId === event.id);
+  if (members.length === 0) return 'planned';
+  return members.some(s => s.status !== 'ended') ? 'active' : 'ended';
 }
 
 /**
@@ -137,27 +203,39 @@ export interface EventGroup {
 }
 
 /**
- * Every event, plus each ungrouped session presented as an event of one.
+ * Every event **that has sessions**, plus each ungrouped session presented as
+ * an event of one.
  *
  * Reporting "by event" has to cover sessions nobody bothered to group, or the
  * chart silently omits most of the year's trading.
+ *
+ * **Session-less events are excluded, and that is the contract.** Since ADR-021
+ * an event can exist with no sessions — created on Thursday for Saturday, or
+ * left behind when its last session was detached — and there is nothing to
+ * report on one. Every consumer here indexes `group.sessions[0]` or measures
+ * `spanOf(group.sessions)`, both of which are wrong on an empty group rather
+ * than merely empty; and `scopeOptions` feeds the analytics picker, which
+ * should not offer a period with no orders, no costs and no hours in it. Use
+ * `allEvents` for a list that includes them — the manager wants them and
+ * nothing else does.
  */
 export function eventGroups(
   events: TradingEvent[],
   sessions: TradingSession[],
 ): EventGroup[] {
-  const groups: EventGroup[] = events.map(ev => {
+  const groups: EventGroup[] = events.flatMap(ev => {
     const members = sessionsForEvent(sessions, ev.id);
-    return {
+    if (members.length === 0) return [];
+    return [{
       id: ev.id,
       name: ev.name,
       sessions: members,
-      startedAt: members[0]?.startedAt ?? ev.createdAt,
+      startedAt: members[0].startedAt,
       endedAt: members.every(s => s.endedAt)
         ? members.reduce((max, s) => Math.max(max, s.endedAt ?? 0), 0) || undefined
         : undefined,
       grouped: true,
-    };
+    }];
   });
 
   for (const s of sessions) {
@@ -173,6 +251,81 @@ export function eventGroups(
   }
 
   return groups.sort((a, b) => b.startedAt - a.startedAt);
+}
+
+/** An event and everything the manager needs to draw a row for it. */
+export interface EventListing {
+  event: TradingEvent;
+  /** Members, oldest first. Empty for a `planned` event. */
+  sessions: TradingSession[];
+  status: EventStatus;
+  /**
+   * When this event actually ran, from its sessions. `null` while it has none —
+   * *not* the planned dates, which are a plan and would read as a measurement
+   * sitting in the column a measurement belongs in.
+   */
+  span: { start: number; end?: number } | null;
+}
+
+/**
+ * Every event the shop has, session-less ones included, each with its derived
+ * status. The manager's list.
+ *
+ * This is the deliberate counterpart to `eventGroups`, and the split is the
+ * whole of ADR-021's mechanism. `eventGroups` answers "what can be reported
+ * on", so an event with no sessions is not in it. `allEvents` answers "what
+ * events exist", so it is — otherwise a plan made on Thursday is invisible
+ * until it has traded, which is the one moment it needed to be visible.
+ *
+ * Ungrouped sessions are **not** here. They are not events, and the manager
+ * shows them in a section of their own precisely so that a real event of one
+ * and a lone session are told apart on screen (ADR-020). `ungroupedSessions`
+ * is that list.
+ *
+ * Sorted newest first, on the sessions where there are any and on the plan
+ * where there are not — a planned event has to sort somewhere, and its planned
+ * start is the only date it has.
+ */
+export function allEvents(
+  events: TradingEvent[],
+  sessions: TradingSession[],
+): EventListing[] {
+  return events
+    .map(event => {
+      const members = sessionsForEvent(sessions, event.id);
+      return {
+        event,
+        sessions: members,
+        status: eventStatus(event, sessions),
+        span: members.length === 0 ? null : {
+          start: members[0].startedAt,
+          end: members.every(s => s.endedAt)
+            ? members.reduce((max, s) => Math.max(max, s.endedAt ?? 0), 0) || undefined
+            : undefined,
+        },
+      };
+    })
+    .sort((a, b) => sortKeyOf(b) - sortKeyOf(a));
+}
+
+const sortKeyOf = (listing: EventListing) =>
+  listing.span?.start ?? listing.event.plannedStart ?? listing.event.createdAt;
+
+/**
+ * Sessions belonging to no event, newest first.
+ *
+ * A session whose `eventId` names an event that is not in the list counts as
+ * ungrouped, matching `eventGroups` — a dangling id is a broken link, and
+ * hiding the session because of it would lose it from both lists at once.
+ */
+export function ungroupedSessions(
+  events: TradingEvent[],
+  sessions: TradingSession[],
+): TradingSession[] {
+  const known = new Set(events.map(e => e.id));
+  return sessions
+    .filter(s => !s.eventId || !known.has(s.eventId))
+    .sort((a, b) => b.startedAt - a.startedAt);
 }
 
 /* ---------------------------------------------------------------- numbering */

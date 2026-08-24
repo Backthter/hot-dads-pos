@@ -149,6 +149,9 @@ fn run_migrations(db_path: &PathBuf) {
         CREATE TABLE IF NOT EXISTS trading_events (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
+            planned_start INTEGER,
+            planned_end INTEGER,
+            venue TEXT,
             notes TEXT,
             created_at INTEGER NOT NULL
         );
@@ -238,6 +241,19 @@ fn run_migrations(db_path: &PathBuf) {
         "basis",
         "TEXT NOT NULL DEFAULT 'per-session'",
     );
+
+    // An event may now exist before its sessions do (ADR-020), so it needs
+    // somewhere to say when it is *meant* to run and where. These are a plan and
+    // never the record: what an event actually spanned still comes from its
+    // sessions, and nothing derives membership or a window from these columns.
+    //
+    // All nullable with no default. A missing plan is not a plan of zero, and an
+    // event created by grouping sessions after the fact correctly has none.
+    // There is no `status` column here on purpose — status is derived from the
+    // sessions, and storing it would drift the first time one was resumed.
+    add_column_if_missing(&conn, "trading_events", "planned_start", "INTEGER");
+    add_column_if_missing(&conn, "trading_events", "planned_end", "INTEGER");
+    add_column_if_missing(&conn, "trading_events", "venue", "TEXT");
 
     add_column_if_missing(&conn, "parked_sessions", "discount_kind", "TEXT");
     add_column_if_missing(&conn, "parked_sessions", "discount_value", "REAL");

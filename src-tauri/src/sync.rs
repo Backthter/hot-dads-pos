@@ -62,6 +62,10 @@ const SYNC_TABLES: &[SyncTable] = &[
     // Sessions before orders: orders carry a session_id, and a till that syncs
     // the orders without the sessions shows tickets pointing at nothing, with
     // every session-scoped figure silently empty.
+    // Events before sessions, for the same reason: a session carries an
+    // event_id. Its position is load-bearing and 1C-ii-a left it alone. The
+    // columns are read per table by `get_table_columns`, so the planned dates
+    // and venue added that phase replicate with no change here.
     replace("trading_events"),
     replace("trading_sessions"),
     replace("cost_entries"),

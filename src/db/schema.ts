@@ -58,10 +58,25 @@ export const orders = sqliteTable("orders", {
   sessionTicket: integer("session_ticket"),
 });
 
-/** A container for sessions. Holds no orders of its own. */
+/**
+ * A container for sessions. Holds no orders of its own.
+ *
+ * There is deliberately no `status` column. What an event is doing is derived
+ * from its sessions by `eventStatus`; a column would be a second source of
+ * truth and would disagree the first time a session inside an ended event was
+ * resumed.
+ */
 export const tradingEvents = sqliteTable("trading_events", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
+  /**
+   * When the market is *meant* to run. A plan, never the record — what an event
+   * actually spans comes from its sessions, and nothing reads these to work
+   * that out. They exist so an event can be created on Thursday for Saturday.
+   */
+  plannedStart: integer("planned_start"),
+  plannedEnd: integer("planned_end"),
+  venue: text("venue"),
   notes: text("notes"),
   createdAt: integer("created_at").notNull(),
 });

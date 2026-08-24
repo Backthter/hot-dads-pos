@@ -161,10 +161,43 @@ export interface Order {
  * market run as three separate services needs one event and three sessions, and
  * the alternative — inferring the grouping from dates — cannot tell that apart
  * from three unrelated markets in the same week.
+ *
+ * An event may exist before any of its sessions do, and an event of one session
+ * is legitimate when a person declares it (ADR-020). What it may not be is
+ * invented by the program to make a basis available — that is still refused,
+ * and ADR-018 stands alongside ADR-020 rather than under it.
+ *
+ * There is no `status` field here on purpose. Status is derived from the
+ * sessions by `eventStatus` in `src/app/lib/sessions.ts`; storing it would be a
+ * second source of truth that drifts the first time somebody resumes a session,
+ * which is the class of problem invariant 4 exists to prevent.
  */
 export interface TradingEvent {
   id: string;
   name: string;
+  /**
+   * When the market is *meant* to run. Optional, and only ever a plan — the
+   * sessions are the record.
+   *
+   * What an event actually spans comes from its sessions and nothing else, as
+   * it always has: `eventGroups` reads `startedAt` and `endedAt` off the
+   * members, `spanOf` measures the members, and every figure scoped to an event
+   * resolves through them. These two fields are never consulted for any of
+   * that, and a plan that says Saturday to Monday over sessions that ran Friday
+   * and Saturday is a wrong plan, not a wrong event.
+   *
+   * They exist so an event can be created on Thursday for Saturday — before any
+   * session exists to say when it ran — and so the manager can sort and label a
+   * `planned` event that has nothing to measure yet. Said this plainly because
+   * the next reader will assume they are the truth; deriving membership or a
+   * window from them re-introduces exactly the guess invariant 4 exists to
+   * prevent.
+   */
+  plannedStart?: number;
+  plannedEnd?: number;
+  /** Where it is held. Display and recognition only; nothing computes on it. */
+  venue?: string;
+  /** Free text about the event. Whatever the shop wants to remember. */
   notes?: string;
   createdAt: number;
 }

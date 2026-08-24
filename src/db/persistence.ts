@@ -1,5 +1,8 @@
 import { getDb } from './database';
 import { COST_ENTRY_COLUMNS, costEntryFromRow, costEntryToRow } from './costEntryRows';
+import {
+  TRADING_EVENT_COLUMNS, tradingEventFromRow, tradingEventToRow,
+} from './tradingEventRows';
 import type {
   MenuItem, Category, Order, CartItem, ParkedSession, StockItem, MenuItemStockAssignment,
   DealItem, Discount, StockMovement, InventorySnapshot, OversellEvent,
@@ -239,14 +242,9 @@ export async function loadAllData(): Promise<PersistedData | null> {
     }));
 
     const eventRows = await db.select<Record<string, unknown>[]>(
-      'SELECT id, name, notes, created_at FROM trading_events ORDER BY created_at'
+      `SELECT ${TRADING_EVENT_COLUMNS.join(', ')} FROM trading_events ORDER BY created_at`
     );
-    const tradingEvents: TradingEvent[] = eventRows.map(r => ({
-      id: String(r.id ?? ''),
-      name: String(r.name ?? ''),
-      notes: r.notes ? String(r.notes) : undefined,
-      createdAt: Number(r.created_at ?? 0),
-    }));
+    const tradingEvents: TradingEvent[] = eventRows.map(tradingEventFromRow);
 
     const tradingSessionRows = await db.select<Record<string, unknown>[]>(
       'SELECT id, event_id, name, status, started_at, ended_at, ticket_counter, paused_ms, paused_at, notes FROM trading_sessions ORDER BY started_at'
@@ -481,16 +479,25 @@ async function runSave(data: PersistedData): Promise<void> {
     const newEventIds = new Set((data.tradingEvents ?? []).map(e => e.id));
     for (const id of oldEventIds) {
       if (!newEventIds.has(id)) {
+        // Reached only when a person deleted the event. Nothing removes one on
+        // its own any more (ADR-021): an event whose last session leaves stays,
+        // with status `planned`, because it may be a plan rather than a
+        // leftover and the program cannot tell which.
+        //
         // Detach rather than cascade: an event is only a grouping, and deleting
         // one must never take its sessions' orders with it.
         await db.execute('UPDATE trading_sessions SET event_id = NULL WHERE event_id = ?', [id]);
         await db.execute('DELETE FROM trading_events WHERE id = ?', [id]);
       }
     }
+    // The planned dates, the venue and the notes are written here alongside the
+    // rest — the columns and the mapping are in `tradingEventRows.ts`, so the
+    // read and the write can only disagree by being edited apart.
+    const eventPlaceholders = TRADING_EVENT_COLUMNS.map(() => '?').join(', ');
     for (const ev of data.tradingEvents ?? []) {
       await db.execute(
-        'INSERT OR REPLACE INTO trading_events (id, name, notes, created_at) VALUES (?, ?, ?, ?)',
-        [ev.id, ev.name, ev.notes ?? null, ev.createdAt]
+        `INSERT OR REPLACE INTO trading_events (${TRADING_EVENT_COLUMNS.join(', ')}) VALUES (${eventPlaceholders})`,
+        tradingEventToRow(ev)
       );
     }
 
