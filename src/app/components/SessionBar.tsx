@@ -18,7 +18,7 @@ import type { Order, TradingEvent, TradingSession } from '../types';
  * manager behind them.
  *
  * The bar answers three questions without being asked: whether a session is
- * live, how long it has actually traded, and how many tickets it has taken.
+ * live, which market it belongs to, and how long it has actually traded.
  * Everything else — resuming, renaming, making and editing events, moving
  * sessions between them — lives behind one button, because those are things you
  * do between services, not during one.
@@ -70,6 +70,18 @@ export function SessionBar(props: SessionBarProps) {
   const live = sessions.find(s => s.status === 'active') ?? null;
   const paused = sessions.filter(s => s.status === 'paused');
 
+  /**
+   * The market the live session belongs to, named on the strip beside it.
+   *
+   * The person at the till should be able to see which market they are in
+   * without opening anything — and this is also the place somebody notices that
+   * today's session never got attached to one, which is the failure that leaves
+   * a pitch fee filed against a market missing one of its days.
+   */
+  const liveEvent = live?.eventId
+    ? events.find(e => e.id === live.eventId) ?? null
+    : null;
+
   const ticketCount = useMemo(
     () => (live ? orders.filter(o => o.sessionId === live.id && !o.voidedAt).length : 0),
     [orders, live],
@@ -105,6 +117,19 @@ export function SessionBar(props: SessionBarProps) {
                 style={{ background: GOOD, boxShadow: `0 0 8px ${GOOD}` }}
               />
               {live.name}
+              {liveEvent && (
+                <>
+                  <span className="text-[var(--app-text-muted)] font-normal">·</span>
+                  <span
+                    className="flex items-center gap-[5px] font-semibold"
+                    style={{ color: ACCENT }}
+                    data-session-event={liveEvent.id}
+                  >
+                    <Tag size={12} />
+                    {liveEvent.name}
+                  </span>
+                </>
+              )}
             </span>
             <span className="text-[var(--app-text-muted)] text-[12px]">
               {ticketCount} ticket{ticketCount === 1 ? '' : 's'} · {hours.toFixed(1)}h trading
