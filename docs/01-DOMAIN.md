@@ -235,19 +235,59 @@ is append-only (invariant 1).
   readable directly off the last line at or before a moment, with nothing to
   accumulate and no drift from summing rounded deltas.
 - **`reason`** — `added`, `packet`, `sold`, `returned`, `waste`, `correction`,
-  `edit`, `drained` or `stocktake`. The distinction matters: `consumptionRate`
-  counts only `sold` and `waste`, or restocking would read as consumption, and
-  a **purchase is a receipt** — `added` and `packet`, nothing else (ADR-014).
-  `stockPurchasesValue` is the only place that decides this, and `foodCost`
-  calls it rather than keeping a second list; when it kept its own, it counted
-  `correction` too and the two figures disagreed about the same delivery.
+  `reversal`, `edit`, `drained` or `stocktake`. The distinction matters:
+  `consumptionRate` counts only `sold` and `waste`, or restocking would read as
+  consumption, and a **purchase is a receipt** — `added` and `packet`, nothing
+  else (ADR-014). `stockPurchasesValue` is the only place that decides this, and
+  `foodCost` calls it rather than keeping a second list; when it kept its own,
+  it counted `correction` too and the two figures disagreed about the same
+  delivery.
+
+  **`correction` and `reversal` are not the same event** (ADR-016), though they
+  look alike on the shelf:
+
+  - A **correction** is a person saying the shelf disagrees with the book. It is
+    a *measurement* of stock that was already there, it carries no cost, and it
+    is not money moving. Under ADR-014 it is definitively not a purchase.
+  - A **reversal** is the program undoing itself. It is *bookkeeping*, and it
+    should be read as neither a purchase nor a count. It shows as **"Undone"**,
+    which is what the user did.
+
+  One word for both is what let an undone delivery go on being counted as money
+  spent: the original stayed a purchase and the line cancelling it, being a
+  correction, counted as nothing.
 - **`referenceType` / `referenceId`** — what caused this. `referenceId` is
   always an immutable id: `order.id`, or the id of the movement being reversed.
-  Never a display string like an order number.
-- **`unitCost` / `totalCost`** — present on receipts, absent on consumption.
+  Never a display string like an order number. A reversal always carries
+  `referenceType: 'movement'` and the id of the row it cancels; so does the line
+  a redo appends, pointing at the original it restores.
+- **`unitCost` / `totalCost`** — present on receipts, absent on consumption. A
+  redo carries the original's, so a restored delivery is a receipt again rather
+  than a costless line the purchase figures cannot see.
 - **`reversed`** — set on a reversal and on the line it reverses, so the pair
   can be hidden from the activity list without either row leaving the ledger.
   This is the one field that may change on a row already on disk.
+
+  It is set **centrally** (ADR-016) — by `buildMovement` for the reversal
+  itself, and by `postMovements` for the row it points at — never at a call
+  site. Because both halves carry it, a reader excluding reversed rows needs no
+  pairing logic. That matters more than it sounds: the ledger caps at 20,000
+  lines and a trim drops the oldest, so a reversal routinely outlives the row it
+  reverses. An orphaned half is still marked and still excluded, where a rule
+  that matched a negative row against a prior positive one would see a live
+  line.
+
+**Who reads what.** `effectiveMovements` drops reversed rows and every
+*economic* figure reads through it — purchases, food cost, shrinkage, dead
+stock, consumption rate. Historical *levels* do not: `ledgerLevelsAt` reads
+every row, because a reversal genuinely moved the shelf and `resulting` records
+where it left it. Convention 6 and ADR-017: **effective for economics, every row
+for levels.**
+
+**Stock history** hides reversed pairs by default, with a **Show undone**
+toggle. Shown, a cancelled line is struck through and dimmed and its partner is
+placed next to it — the ledger stays append-only, but add / remove / add is one
+event that did not stand, not three deliveries.
 
 ---
 

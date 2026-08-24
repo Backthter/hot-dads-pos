@@ -599,3 +599,146 @@ a recipe now needs a stock item to stand for it; that is one more row on the
 shelf and it is the row that makes the cost visible to `foodCost`,
 `stockPurchasesValue` and the reorder list, none of which an override was ever
 part of.
+
+---
+
+## ADR-016 — A reversal is its own reason, and the flag is set centrally
+
+**Status:** accepted · 2026-08
+
+**Context:** Reversals were written two ways. `undoMovement` appended its
+compensating line, marked it `reversed`, and marked the row it reversed.
+`reverseStockChanges` posted a plain negative `correction` and marked nothing.
+Both wrote the shelf correctly, so nothing looked wrong.
+
+Every economic reader skips `reversed` rows. So a delivery undone through the
+second path left its original `added` still counted as a purchase, while the
+line cancelling it counted as nothing — and after ADR-014 made a correction
+definitively *not* a purchase, that line **could** not cancel it. The two halves
+of one event were read by different rules. Undo a Rs 8,000 delivery through the
+order/stock path and the money still showed as spent: the shelf right, the books
+wrong, in the direction that overstates outlay.
+
+Underneath the marking was a naming problem. `correction` meant two opposite
+things. A **correction** is a person saying the shelf disagrees with the book —
+a measurement, carrying no cost, of stock that was already there. A **reversal**
+is the program undoing itself — bookkeeping, which is neither a purchase nor a
+count. One word for both is what let the second path look reasonable.
+
+**Decision:** `'reversal'` joins `StockMovementReason`, distinct from
+`'correction'`, labelled **"Undone"** because that is what the user did and the
+ledger is read by someone standing at a counter.
+
+The flag is set where the paths converge, not at each call site.
+`buildMovement` marks the reversal line whenever the reason is `'reversal'`;
+`postMovements` — the one function every ledger write goes through — marks the
+row that line's `referenceId` points at. `reverseStockChanges` produces a
+`'reversal'` carrying `referenceType: 'movement'` and the id of the row it
+cancels, and `undoMovement` is now a caller of it rather than a second
+implementation that happened to agree.
+
+`reversed` remains the one mutable field on a movement, which invariant 1
+permits explicitly and for exactly this.
+
+**Rejected:** *Inferring reversals by pairing.* Matching a negative row against
+a prior positive one of the same size needs no new field and no new reason, and
+it fails silently in the one case that matters. The ledger caps at 20,000 lines
+and a trim drops the oldest, so a reversal routinely outlives the row it
+reverses. With nothing left to match, an inferring rule sees a live line and
+counts it. A flag on **both** halves survives the trim: the orphan is still
+marked and still excluded, and `metrics.check.ts` asserts exactly that.
+
+Also rejected: *marking at each call site, and adding a test that both sites
+agree.* That is what was already in place informally, and it had already
+failed. The number of write paths is not fixed; the convergence point is.
+
+Also rejected: *keeping `correction` and adding a `bookkeeping: true` flag
+beside it.* A flag is not a reason, and the reason is what the activity list
+shows the user. "Correction · Undone" describes two different events and reads
+as one.
+
+**Consequences:** An undone delivery reports zero outlay through either path,
+and a restored one reports it exactly once. `MOVEMENT_LABELS` gains an entry, so
+stock history and the workbook export both read "Undone" without further change.
+
+Redo needed rethinking as a consequence, and the answer is in the same shape:
+**a redo appends a line duplicating the original's semantics** — same reason,
+same `unitCost` and `totalCost`, with `referenceType: 'movement'` pointing at
+the original — rather than reversing the reversal. Reversing the reversal would
+have appended a second bookkeeping line carrying no cost, so an
+undone-then-restored delivery would have sat on the shelf and been invisible to
+`stockPurchasesValue` and therefore to food cost. The original and its reversal
+stay netted out; the new line is a live receipt. Append-only, no pairing,
+survives a trim.
+
+One consequence in the hooks is worth naming because it is easy to undo by
+accident. Undo and redo now track the lines **currently standing** for a change,
+not the lines written the first time. A redo appends a fresh line, so the next
+undo must cancel *that* one; reversing the original a second time would mark a
+row already marked and leave the redone line counted as a live purchase for
+ever. `applyStockChanges` returns what it wrote so the call sites can hold it.
+
+The stock side of an order void deliberately writes no reversal. Returning a
+voided order's ingredients and taking them back off are real physical movements
+with reasons of their own — `returned` and `sold` — not the program undoing its
+own bookkeeping. Marking them would hide a sale that genuinely happened.
+
+---
+
+## ADR-017 — Effective for economics, every row for levels
+
+**Status:** accepted · 2026-08
+
+**Context:** ADR-016 makes `reversed` reliable on both halves of a pair. The
+question it raises immediately is who reads it. Several consumers re-derived the
+rule inline — `stockPurchasesValue` had `|| m.reversed` in its loop, others had
+nothing at all — and they did not agree. That is the same failure ADR-014 fixed
+for the definition of a purchase, one level down.
+
+The obvious fix is one filter used everywhere. That fix is wrong, in a way that
+is invisible on the screen and would be "tidied" into place by a later session
+acting in good faith.
+
+**Decision:** One filter, `effectiveMovements`, and a rule about where it goes.
+
+**Economics reads effective rows.** `stockPurchasesValue`, `foodCost`'s
+purchases and its `basis`, `shrinkageValue`, `deadStock` and `consumptionRate`.
+A delivery that was undone is not an outlay; waste that was undone was never
+thrown away; a count that was undone is not a finding; a sale that was undone
+consumed nothing.
+
+**Levels read every row.** `ledgerLevelsAt` must not filter, and the comment on
+it says so at length. It reads `resulting` — the physical level a row left
+behind — and a reversal genuinely moved the shelf. Filter it out and the last
+surviving line at or before the mark is the wrong one, so every historical level
+shifts by the reversed amount, and with it both ends of `foodCost`. Nothing
+errors. The figures stay plausible and stop being true.
+
+`inventoryTurnover` is named here because a reader will come looking for the
+call that is not in it. It reads no movements at all: `totals.cogs` is the sum
+of frozen line costs on live orders, and average inventory comes from the daily
+snapshots, which are measurements of a shelf a reversal genuinely moved. Both
+inputs are already effective by construction.
+
+This is recorded as **convention 6** in `03-INVARIANTS.md`.
+
+**Rejected:** *Filtering in `ledgerLevelsAt` too, for consistency.* This is the
+decision the ADR exists to prevent. It is the tidier code and it silently breaks
+historical stock, food cost, and every figure built on either. `metrics.check.ts`
+now asserts the level at a moment inside an undone/restored cycle *and* asserts
+what the filtered ledger would have said instead, so the difference is a failing
+check rather than a judgement call.
+
+Also rejected: *pushing the filter down into the callers of `foodCost` so it
+receives an already-filtered ledger.* Then the levels inside it would have been
+filtered too, arriving at the same corruption from further away, where the
+comment explaining it could not be read.
+
+**Consequences:** Six economic figures now agree about what happened, by
+construction rather than by six loops that have to be kept in step. Purchases
+and shrinkage fall for any shop that has undone anything, which is the previous
+figures' error becoming visible — the same shape as ADR-012's and ADR-014's.
+
+The distinction has to be carried by a comment at both sites, because the code
+cannot express it: two functions reading the same table, one filtering and one
+not, is exactly what looks like a bug to someone who has not read this.

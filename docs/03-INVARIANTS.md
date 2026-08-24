@@ -42,9 +42,15 @@ produced it, and there is then no way to tell which of the two is lying.
 - `src/db/persistence.ts` — the `stock_movements` block in `runSave`. Rows
   already on disk are skipped entirely; the only write against an existing row
   is `UPDATE ... SET reversed = ?`.
-- `src/app/state/useStock.ts` — `undoMovement` appends a `correction` line
-  carrying `referenceType: 'movement'` rather than removing anything;
-  `reverseStockChanges` posts the opposite movement.
+- `src/app/lib/inventory.ts` — `postMovements` is the only way a line reaches
+  the ledger. It appends, trims from the oldest end, and marks the row a
+  reversal points at. That `UPDATE ... SET reversed` is the sole write against
+  an existing row anywhere in the program.
+- `src/app/state/useStock.ts` — `undoMovement` and `reverseStockChanges` both
+  append a `reversal` line carrying `referenceType: 'movement'` and the id of
+  the row it cancels, rather than removing anything. A redo appends a fresh line
+  duplicating the original's meaning; it does not un-append the reversal
+  (ADR-016).
 - `src/app/lib/history.tsx` — the reason undo stores actions rather than
   snapshots at all. A snapshot restore would overwrite the ledger.
 - `src-tauri/src/sync.rs` — `stock_movements`, `inventory_snapshots` and
@@ -224,3 +230,65 @@ undo, and then stops using the count.
   `explainNotUndoable`. Taking money is the one thing in the app with a
   consequence outside it; the supported reversal is voiding the ticket, which
   keeps the record.
+
+---
+
+# Conventions
+
+Weaker than the invariants above. Breaking one of these does not corrupt data on
+its own; it makes the next thing that reads the code arrive at a wrong
+conclusion, which is how the invariants get broken by someone acting carefully.
+
+They were established a phase at a time and lived only in the phase documents
+until Phase 1B, where a sixth needed a home that a later session would actually
+find. They are consolidated here; the phase documents remain the record of why
+each one arrived.
+
+1. **`now` is a parameter, never a call.** Anything that needs the current time
+   takes it. `useNow` is the only subscriber to a timer. *(Phase 0)*
+
+2. **A hook reads the snapshot ref, not its closure**, for anything it is about
+   to write back. *(Phase 0)*
+
+3. **Undo recording stays at the mutation site; no hook gets its own save.**
+   Undo is asymmetric (ADR-004) and only the site of a change knows how to
+   reverse it, so a central recorder would have to be told — the same thing with
+   more indirection. `saveImmediate` exists so a multi-table action is one
+   write; splitting it produces partial writes, and the ones that matter are
+   exactly the money-adjacent ones. *(Phase 0)*
+
+4. **Amounts are only comparable within their basis.** Nothing totals across
+   them. A function that returns money must say which volumes it resolved the
+   rates against. *(Phase 1A-i)*
+
+5. **A target may not depend on when it is read.** Any figure a shop is meant to
+   aim at has to be a function of the facts in force, not of how far through the
+   period the reader happens to be, and not of anything that happened after the
+   period it describes. Progress against a target moves; the target does not.
+   *(Phase 1A-ii)*
+
+   This governs **targets** — break-even, prep quantities, reorder points — and
+   not **projections**. A within-day projection *is* deliberately a function of
+   how far through the session the reader is; that is what makes it a
+   projection. It must be labelled as one and must never be presented as a
+   target. See Phase 1B's *What the next phase can now assume*.
+
+6. **Effective for economics, every row for levels.** *(Phase 1B, ADR-017)*
+
+   Every figure about money or usage reads the stock ledger through
+   `effectiveMovements`, which drops rows marked `reversed`:
+   `stockPurchasesValue`, `foodCost`'s purchases and its `basis`,
+   `shrinkageValue`, `deadStock`, `consumptionRate`. A delivery that was undone
+   is not an outlay, and a sale that was undone consumed nothing.
+
+   Historical **levels** read every row. `ledgerLevelsAt` must not filter: it
+   reads `resulting`, the physical level a row left behind, and a reversal
+   genuinely moved the shelf. Filter it and the last surviving line at or before
+   the mark is the wrong one, so every historical level shifts by the reversed
+   amount and takes both ends of `foodCost` with it. Nothing errors.
+
+   Two functions reading the same table, one filtering and one not, looks like
+   an inconsistency to anyone who has not read ADR-017. A comment at both sites
+   says which rule applies and why, and `metrics.check.ts` asserts both the
+   correct level and the wrong one the filter would have produced — so making
+   them "consistent" fails a check rather than passing review.
