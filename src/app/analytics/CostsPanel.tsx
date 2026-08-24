@@ -7,6 +7,7 @@ import { costSummary } from './metrics';
 import {
   COST_BASIS_LABEL, COST_BASIS_UNIT, describeCostAmount, needsRefiling,
 } from '../lib/sessions';
+import type { PerEventAvailability } from './scope';
 import type { CostBasis, CostEntry, TradingEvent, TradingSession } from '../types';
 
 /** The five bases, in the order the form offers them: flat first, then rates. */
@@ -41,7 +42,7 @@ const BASIS_HINT: Record<CostBasis, string> = {
  */
 export function CostsPanel({
   costs, sessions, events, onAdd, onRefile, onDelete, scopeLabel, scopedCosts,
-  noticeDismissed, onDismissNotice,
+  noticeDismissed, onDismissNotice, perEvent,
 }: {
   costs: CostEntry[];
   sessions: TradingSession[];
@@ -55,10 +56,17 @@ export function CostsPanel({
   /** Whether the shop has already dealt with the fixed/variable migration. */
   noticeDismissed: boolean;
   onDismissNotice: () => void;
+  /**
+   * Whether `per-event` has anywhere to go from the scope this panel was opened
+   * in, and what to say when it has not. Resolved by `resolveScope`, not worked
+   * out here — the panel and the figures have to agree about the same market
+   * (ADR-018).
+   */
+  perEvent: PerEventAvailability;
 }) {
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
-  const [basis, setBasis] = useState<CostBasis>('per-session');
+  const [basisPicked, setBasisPicked] = useState<CostBasis>('per-session');
   const [error, setError] = useState('');
   /** Empty means "whatever is trading now", which is the usual case. */
   const [target, setTarget] = useState('');
@@ -69,6 +77,19 @@ export function CostsPanel({
    * the notice is dismissed.
    */
   const [justRefiled, setJustRefiled] = useState<string[]>([]);
+
+  /**
+   * The basis actually in force.
+   *
+   * Derived rather than corrected in an effect: the scope can change under an
+   * open panel, and a basis that was legal when it was pressed must not stay
+   * selected once it has nothing to attach to. Falling back to `per-session`
+   * loses nothing — it is where an unplaceable cost would end up anyway, and
+   * the reason is on screen beside the button.
+   */
+  const basis: CostBasis = !perEvent.available && basisPicked === 'per-event'
+    ? 'per-session'
+    : basisPicked;
 
   const live = sessions.find(s => s.status === 'active') ?? null;
   const names = useMemo(() => new Map(sessions.map(s => [s.id, s.name])), [sessions]);
@@ -118,7 +139,9 @@ export function CostsPanel({
     }
     const [kindOfTarget, id] = target.split(':');
     // A per-event cost is paid once for the whole event, so without one there
-    // is nothing for it to belong to and no figure it would appear in.
+    // is nothing for it to belong to and no figure it would appear in. The
+    // basis is not offered at all when the scope has no event (ADR-018); this
+    // stays as the guard of last resort.
     if (basis === 'per-event' && kindOfTarget !== 'event') {
       setError('Pick the event this was paid for');
       return;
@@ -193,37 +216,51 @@ export function CostsPanel({
             />
 
             <div className="grid gap-[6px]" style={{ gridTemplateColumns: '1fr 1fr' }}>
-              {BASES.map((b, index) => (
-                <button
-                  key={b}
-                  type="button"
-                  onClick={() => {
-                    setBasis(b);
-                    setError('');
-                    // The session that was picked is not on offer under
-                    // per-event, and leaving it selected would show a control
-                    // whose value is not one of its options.
-                    if (b === 'per-event' && !target.startsWith('event:')) setTarget('');
-                  }}
-                  data-cost-basis={b}
-                  className="flex flex-col items-start gap-[2px] px-[11px] py-[9px] rounded-[10px] border text-left transition-colors duration-150"
-                  style={{
-                    gridColumn: index === BASES.length - 1 ? '1 / -1' : undefined,
-                    borderColor: basis === b ? ACCENT : 'var(--app-border)',
-                    background: basis === b ? alpha(ACCENT, 0.13) : 'transparent',
-                  }}
-                >
-                  <span
-                    className="text-[13px] font-semibold"
-                    style={{ color: basis === b ? ACCENT : 'var(--app-text)' }}
+              {BASES.map((b, index) => {
+                // Offered only when it has somewhere to go. The alternative —
+                // offering it and refusing the submission — was the bug 1A-ii
+                // recorded: the basis was reachable from a lone session and
+                // could not attach to anything (ADR-018).
+                const disabled = b === 'per-event' && !perEvent.available;
+                return (
+                  <button
+                    key={b}
+                    type="button"
+                    disabled={disabled}
+                    aria-disabled={disabled}
+                    title={disabled ? perEvent.reason : undefined}
+                    onClick={() => {
+                      if (disabled) return;
+                      setBasisPicked(b);
+                      setError('');
+                      // The session that was picked is not on offer under
+                      // per-event, and leaving it selected would show a control
+                      // whose value is not one of its options.
+                      if (b === 'per-event' && !target.startsWith('event:')) setTarget('');
+                    }}
+                    data-cost-basis={b}
+                    data-cost-basis-disabled={disabled ? '' : undefined}
+                    className="flex flex-col items-start gap-[2px] px-[11px] py-[9px] rounded-[10px] border text-left transition-colors duration-150"
+                    style={{
+                      gridColumn: index === BASES.length - 1 ? '1 / -1' : undefined,
+                      borderColor: basis === b ? ACCENT : 'var(--app-border)',
+                      background: basis === b ? alpha(ACCENT, 0.13) : 'transparent',
+                      opacity: disabled ? 0.45 : 1,
+                      cursor: disabled ? 'not-allowed' : 'pointer',
+                    }}
                   >
-                    {COST_BASIS_LABEL[b]}
-                  </span>
-                  <span className="text-[10.5px] text-[var(--app-text-muted)] leading-[14px]">
-                    {BASIS_HINT[b]}
-                  </span>
-                </button>
-              ))}
+                    <span
+                      className="text-[13px] font-semibold"
+                      style={{ color: basis === b ? ACCENT : 'var(--app-text)' }}
+                    >
+                      {COST_BASIS_LABEL[b]}
+                    </span>
+                    <span className="text-[10.5px] text-[var(--app-text-muted)] leading-[14px]">
+                      {disabled ? perEvent.reason : BASIS_HINT[b]}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
 
             <Button type="submit" variant="primary" block data-cost-add icon={<Plus size={16} />}>

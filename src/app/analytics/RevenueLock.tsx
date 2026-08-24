@@ -31,8 +31,9 @@ export function LockedRevenue({ onUnlock }: { onUnlock: () => void }) {
           Revenue is locked
         </p>
         <p className="text-[var(--app-text-muted)] text-[14px] leading-[19px] mt-[4px] max-w-[380px]">
-          Takings, profit and margin are hidden until the PIN is entered. Order counts and the
-          Orders tab stay available.
+          Takings, profit and margin are hidden until the PIN is entered. History &middot; Orders
+          and History &middot; Stock stay open, and Inventory still shows what is on the shelf —
+          quantities, without the money.
         </p>
       </div>
 

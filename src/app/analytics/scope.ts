@@ -51,7 +51,41 @@ export interface ResolvedScope {
   sessionScoped: boolean;
   /** The comparable previous period: the prior session, event, or window. */
   previous: { label: string; orders: Order[] } | null;
+  /**
+   * The grouped event this scope resolves to, when it resolves to a real one.
+   *
+   * `undefined` for a lone session, which is *presented* as an event of one but
+   * has no event id and therefore nothing a `per-event` cost could attach to.
+   * This is the same value `costsOf` is given, said out loud so that the screens
+   * can agree with what the resolver actually did.
+   */
+  eventId?: string;
+  /** Whether a `per-event` cost has anywhere to go from here (ADR-018). */
+  perEvent: PerEventAvailability;
 }
+
+/**
+ * Whether the cost form may offer `per-event`, and what to say when it may not.
+ *
+ * See ADR-018. A `per-event` cost requires an event id, and there are two
+ * scopes that cannot supply one: a lone session, which looks like an event of
+ * one and is not, and a date window in a shop that has never grouped anything.
+ * Offering the basis in either case produces an amount attached to nothing —
+ * refused by the form at best, and invisible to every figure at worst.
+ */
+export interface PerEventAvailability {
+  available: boolean;
+  /** Plain-language reason, and what to do about it. Absent when available. */
+  reason?: string;
+}
+
+const NO_EVENT_HERE =
+  'This session is not part of an event yet. Group it with the other days of '
+  + 'the market first, and a cost can then be charged once for all of them.';
+
+const NO_EVENTS_AT_ALL =
+  'You have no events yet. Group the days of a market together and a cost can '
+  + 'then be charged once for the whole thing rather than to one of the days.';
 
 export interface ScopeInput {
   orders: Order[];
@@ -109,6 +143,10 @@ export function resolveScope(scope: Scope, input: ScopeInput): ResolvedScope {
       : input.sessions.filter(s => s.id === scope.id);
 
     if (members.length > 0) {
+      // The one id a `per-event` cost can be filed against. A group that is not
+      // `grouped` is a single session wearing an event's clothes: it has a
+      // name and a span, and no event row behind it.
+      const eventId = group?.grouped ? group.id : undefined;
       const span = spanOf(members, now)!;
       const range: DateRange = { start: span.start, end: span.end, label: group?.name ?? 'Session' };
       const tradingHours = members.reduce((sum, s) => sum + sessionTradingHours(s, now), 0);
@@ -134,7 +172,7 @@ export function resolveScope(scope: Scope, input: ScopeInput): ResolvedScope {
           ? `${members.length} session${members.length === 1 ? '' : 's'} · ${dates}`
           : dates,
         orders: ordersOf(input.orders, members),
-        costs: costsOf(input.costs, members, group?.grouped ? group.id : undefined),
+        costs: costsOf(input.costs, members, eventId),
         sessions: members,
         range,
         tradingHours,
@@ -142,6 +180,10 @@ export function resolveScope(scope: Scope, input: ScopeInput): ResolvedScope {
         previous: prior
           ? { label: prior.name, orders: ordersOf(input.orders, prior.sessions) }
           : null,
+        eventId,
+        perEvent: eventId !== undefined
+          ? { available: true }
+          : { available: false, reason: NO_EVENT_HERE },
       };
     }
     // The session or event was deleted out from under the picker. Fall through
@@ -172,6 +214,12 @@ export function resolveScope(scope: Scope, input: ScopeInput): ResolvedScope {
       label: 'Previous period',
       orders: ordersInRange(input.orders, comparison),
     },
+    // A date window belongs to no event, but a cost logged from one is picked
+    // up by its timestamp — so the basis is offered as long as there is a real
+    // event somewhere to file it against, and refused when there is not.
+    perEvent: input.events.length > 0
+      ? { available: true }
+      : { available: false, reason: NO_EVENTS_AT_ALL },
   };
 }
 

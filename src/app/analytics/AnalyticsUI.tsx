@@ -128,6 +128,26 @@ export function KpiCard({
   );
 }
 
+/**
+ * The wrapper every analytics tab is drawn inside.
+ *
+ * It lived in `AnalyticsView` while there was one file. Four tab files share it
+ * now, and the transition is part of what makes changing tab read as one thing
+ * replacing another rather than the screen blinking — so it belongs with the
+ * section's other presentational pieces rather than being copied four times.
+ */
+export function Screen({ children }: { children: ReactNode }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }}
+      transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+      className="flex flex-col gap-[16px]"
+    >
+      {children}
+    </motion.div>
+  );
+}
+
 export function Panel({
   title, subtitle, children, actions, className = '',
 }: {
