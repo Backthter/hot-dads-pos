@@ -233,7 +233,17 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
     return event;
   }, [snapshot, history]);
 
-  /** Renames an event, or edits its plan. The sessions are untouched either way. */
+  /**
+   * Renames an event, or edits its plan. The sessions are untouched either way.
+   *
+   * A field is changed only when its key is **present** in `changes`, and
+   * passing it as `undefined` clears it. That distinction is the whole
+   * interface: a form that shows the dates and the venue but not the notes
+   * passes three keys, and the notes survive. Taking `changes` as a plain
+   * overwrite instead would silently erase every field the caller happened not
+   * to draw — which is what this did on first writing, and what the manager's
+   * form would have triggered on the notes every time it was saved.
+   */
   const editEvent = useCallback((
     eventId: string,
     changes: { name?: string } & EventDetails,
@@ -245,10 +255,10 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
     const updated: TradingEvent = {
       ...target,
       ...(name ? { name } : {}),
-      plannedStart: changes.plannedStart,
-      plannedEnd: changes.plannedEnd,
-      venue: changes.venue?.trim() || undefined,
-      notes: changes.notes?.trim() || undefined,
+      ...('plannedStart' in changes ? { plannedStart: changes.plannedStart } : {}),
+      ...('plannedEnd' in changes ? { plannedEnd: changes.plannedEnd } : {}),
+      ...('venue' in changes ? { venue: changes.venue?.trim() || undefined } : {}),
+      ...('notes' in changes ? { notes: changes.notes?.trim() || undefined } : {}),
     };
     const next = before.map(e => (e.id === eventId ? updated : e));
     setTradingEvents(next);
