@@ -115,12 +115,6 @@ export const HISTORY_SOURCES: readonly HistorySourceDefinition[] = [
   { id: 'money', label: 'Money', locked: 'all', arriving: '1C-ii' },
 ];
 
-const SOURCE_LOCK: Record<HistorySource, TabLock> = {
-  orders: 'none',
-  stock: 'none',
-  money: 'all',
-};
-
 /**
  * The lock in force, given where the reader is.
  *
@@ -129,7 +123,12 @@ const SOURCE_LOCK: Record<HistorySource, TabLock> = {
  * a tab does.
  */
 export function lockFor(tab: TabId, source: HistorySource = DEFAULT_HISTORY_SOURCE): TabLock {
-  if (tab === 'history') return SOURCE_LOCK[source];
+  // Read off the same definitions the selector and the tab bar are built from.
+  // A second table here would be a second thing to keep in step, and the one
+  // that fell behind would fall behind in the direction that shows money.
+  if (tab === 'history') {
+    return HISTORY_SOURCES.find(s => s.id === source)?.locked ?? 'all';
+  }
   return TABS.find(t => t.id === tab)?.locked ?? 'all';
 }
 

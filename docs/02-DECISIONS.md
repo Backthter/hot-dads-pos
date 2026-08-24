@@ -742,3 +742,162 @@ figures' error becoming visible — the same shape as ADR-012's and ADR-014's.
 The distinction has to be carried by a comment at both sites, because the code
 cannot express it: two functions reading the same table, one filtering and one
 not, is exactly what looks like a bug to someone who has not read this.
+
+---
+
+## ADR-018 — `per-event` is unavailable when the scope has no grouped event
+
+**Status:** accepted · 2026-08
+
+**Context:** Phase 1A-ii recorded this as its bug 2 and left it, correctly: it
+is scope behaviour, and the scope was not what that phase was changing.
+
+A `per-event` cost requires an `eventId` (ADR-012), asserted at the write sites
+because an entry with the basis and no event is an amount attached to nothing.
+`resolveScope` honours that on the read side: it hands `costsOf` an event id
+only when the group it resolved is a real one — `group?.grouped ? group.id :
+undefined`.
+
+The trouble is at the other end. `eventGroups` presents every ungrouped session
+as an event of one, so that reporting "by event" covers the sessions nobody
+bothered to group. That stand-in has a name, a span and an id which is the
+*session's* id. Scope one of those and the screen says you are looking at an
+event; the cost form offers `per-event` because it offers all five bases; and
+the entry cannot be filed, because there is no event for it to belong to. The
+form refuses it after the fact — "Pick the event this was paid for" — with
+nothing on screen to pick.
+
+So the basis was reachable from a scope where it could never succeed, and the
+only feedback was a rejection that read like a bug in the form.
+
+**Decision:** The resolver decides, and the form asks. `ResolvedScope` gains
+`eventId` — the same id `costsOf` was given, said out loud — and
+`perEvent: { available, reason? }`. `per-event` is offered only where it has
+somewhere to go:
+
+- **A session scope** — available when the session belongs to a real event.
+  A lone session is not one, whatever it is drawn as.
+- **An event scope** — always available; this is the case the basis exists for.
+- **A date scope** — available when the shop has any real event at all. A date
+  window belongs to no event, but a cost logged from one is picked up by its
+  timestamp, so what matters is only whether there is an event to file against.
+
+`CostsPanel` disables the button and shows the reason in the place the hint
+would have been, which says what to do: group the sessions first. The submit
+guard stays as the guard of last resort.
+
+The decision lives in the resolver rather than in the panel because the panel
+and the figures must not be able to disagree about the same market. `costsOf`
+and the form now read one answer.
+
+**Rejected:** *Auto-creating an event of one when a lone session is scoped.*
+This is the fix a later session will otherwise reach for, and it is why this ADR
+exists. It would make ADR-013's held-cost distinction meaningless: the "event"
+and the session would be the same period, so a cost filed against the event
+would be reported by `heldEventCosts` as something the event carries *on top of*
+the session — a cost the session already owes, stated twice, once as its own and
+once as outstanding. The panel would then offer to switch to "the whole event"
+and land on the same figures it was already showing.
+
+It also invents a row nobody asked for. An event is a name a shop gives to a
+market it ran over several days; creating one silently, as a side effect of
+opening a cost form, puts a thing in the picker that the shop did not make and
+cannot explain.
+
+Also rejected: *letting the session id stand in for the event id* — the same
+thing without the row. Every event figure would then match on an id that is a
+session's, `costsForEvent` would return costs for something that is not an
+event, and the two ids would be indistinguishable at every site that takes
+either.
+
+Also rejected: *offering the basis everywhere and improving the error message.*
+The error is not the problem. A control that is offered, pressed, and then
+refused has already cost the shop the decision; and the amount typed against it
+is lost when the basis falls back.
+
+**Consequences:** A cost can no longer be filed against nothing. The number of
+things the form offers now depends on the scope, which is a new idea in that
+panel — the basis is derived rather than held in state, so a scope change under
+an open form cannot leave an illegal basis selected.
+
+A shop that has never grouped anything sees four bases rather than five, and is
+told why. That is the honest answer: until there is an event, there is no such
+thing as a cost for the whole of one.
+
+---
+
+## ADR-019 — The revenue lock is per-tab, and may hide columns rather than screens
+
+**Status:** accepted · 2026-08
+
+**Context:** The revenue PIN was one condition, written where the analytics
+screen was drawn: `revenueLocked && tab !== 'orders'`. It was correct while
+there were four tabs and exactly one of them had no money on it, and it stated
+the rule as an exception — everything is hidden, except the one that is not.
+
+Phase 1C-i makes that untenable in two directions at once. There are now four
+tabs and one of them, History, is three screens behind a source selector, so
+"which tab" stops being enough to answer with. And Inventory is the first screen
+in the app that is *partly* money: how much of a thing is on the shelf, and how
+many days that covers, are answers a cashier needs during service; what it is
+worth and what it cost are not. Locking the tab entirely makes the revenue PIN
+the price of checking whether the mince is running low, which is the wrong
+trade — the PIN exists so a till operator can work, not so they cannot.
+
+Written as a condition, that becomes `revenueLocked && tab !== 'orders' && tab
+!== 'inventory' && !(tab === 'history' && source !== 'money')`, in the file that
+draws the screen, re-derived by every tab added after it.
+
+**Decision:** The lock is a **capability the tab declares**, in
+`src/app/analytics/tabs/model.ts`:
+
+```
+locked: 'all' | 'money-columns' | 'none'
+```
+
+`all` replaces the tab with the lock screen. `money-columns` draws the tab with
+the money on it withheld. `none` is unaffected. History declares `none` and
+delegates: each source declares its own, because History's answer depends on
+which records are being read — Orders and Stock are open, Money is not.
+
+Two pure functions resolve it, and they are the only place in the section that
+turns a declaration into a rendering decision: `lockFor(tab, source)` says which
+lock is in force, and `resolveLock(locked, revenueLocked)` says what that means
+now. `AnalyticsView` calls them once and hands each tab the answer. Nothing
+below reads `revenueLocked` to decide whether to draw itself.
+
+Inventory has no table until 1C-iii, so the capability is defined, applied, and
+its column list left for that phase. That is deliberate: the rule is the part
+that has to be settled before two sessions build inside it.
+
+**Rejected:** *Keeping the condition and extending it.* It works, and it is
+correct until the next screen, at which point it is correct only if whoever adds
+that screen finds it. The number of tabs is not fixed; the place the lock is
+resolved is.
+
+Also rejected: *each tab checking `revenueLocked` for itself.* Then the rule is
+stated four times, and the fourth statement is the one that is wrong — and it is
+wrong in the direction that shows money, which is the failure nobody notices
+until it matters.
+
+Also rejected: *a boolean `hidesMoney` beside the existing check.* Two booleans
+express four states, three of which are meaningful and one of which — hidden and
+money-hidden together — is not. A closed set of three names cannot be put into
+the meaningless state.
+
+Also rejected: *hiding the Inventory tab's money by omitting the figures from
+its props.* The tab would then be unable to say that anything is being withheld,
+and a column that silently disappears reads as a missing feature rather than as
+a lock. The tab is told, and says so.
+
+**Consequences:** Adding a tab is declaring a value rather than remembering a
+rule, and `metrics.check.ts` asserts the whole table — including that `hidden`
+and `moneyHidden` are alternatives, never both.
+
+**V2's roles are the eventual consumer, and this is the shape they need.** "May
+see stock levels, may not see what stock cost" is the same statement as
+`money-columns`, made about a person instead of about a PIN. When roles arrive,
+what changes is where the second argument comes from — a role rather than one
+global flag — and not what a tab has to declare. That is the reason this is a
+capability now, while there is exactly one tab that needs it, rather than an
+`if` that would have to be found again and turned into one.

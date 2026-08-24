@@ -400,6 +400,30 @@ window as well; for a session scope that window is simply the session's own span
 `sessionScoped` says which kind of figure the screen is showing, and the
 `tradingHours` denominator differs accordingly (ADR-008).
 
+`eventId` is the grouped event a scope resolves to, and is `undefined` for a
+lone session — which is *presented* as an event of one and is not one.
+`perEvent` says whether a `per-event` cost has anywhere to go from here, and
+what to tell the shop when it has not (ADR-018).
+
+---
+
+## The two order screens
+
+**All Orders (the Orders section) and History · Orders (inside Analytics) are
+deliberately two screens over the same rows, and neither is a duplicate of the
+other.** All Orders is operational: it is the board, it is what a till operator
+works from during service, it moves tickets between stages and voids them, and
+it is usable without the revenue PIN because a kitchen cannot stop working
+because the manager is out. History · Orders is reporting: it searches every
+order ever taken, with a filter tree, saved searches and money on every row, and
+it changes nothing. The same order appears on both and means something different
+on each.
+
+Said here because the resemblance is close enough to look like an oversight. A
+later session tidying the app will otherwise notice two order lists, merge them,
+and produce one screen that is either a board with reporting bolted on or a
+report that a cashier cannot open.
+
 ---
 
 ## Trading hours

@@ -30,6 +30,7 @@ src/
     components/         shared presentational pieces
     lib/                pure domain logic; no React except history/navigation
     analytics/          the reporting layer, and its own screens
+      tabs/             the four analytics tabs, and the tab set as data
     inventory/          the stock screens
     settings/           the settings screen
     ui/                 the design system: tokens, primitives, motion, clock
@@ -283,6 +284,43 @@ The dependency arrays there are load-bearing: `now` from `useNow` belongs in the
 memos that genuinely depend on the current time — the scope, food cost, trading
 hours — and deliberately not in the item and category tables, which do not, and
 which are expensive (ADR-009).
+
+**The screen is four tabs, and the split between them is not the split between
+the files.** Since Phase 1C-i the tabs are:
+
+| Tab | Question | Absorbs |
+|---|---|---|
+| **Finance** | Did this pay? | the old Overview and Costs |
+| **Inventory** | What do I have, and what is it doing? | — |
+| **Business** | What's working? | the old Sales |
+| **History** | What happened? | the old Orders |
+
+History carries a source selector — **Orders · Stock · Money** — because those
+are three record sets answering one question rather than three destinations.
+Costs is no longer a tab at all: logging a cost is something done *because* of a
+figure, so `CostsPanel` and the costs explainer are pages reached from Finance,
+pushed as navigation steps so Back returns to the tab they were opened from.
+
+`analytics/tabs/` holds the four tab components and one file that is not a
+component. **`tabs/model.ts` is the tab set as data** — ids, labels, the History
+sources, the lock capability and the id migration — and it is deliberately pure,
+with no React and no icons, so `metrics.check.ts` can run the parts of the tab
+bar that are worth checking. The icons are attached in `AnalyticsView`, where
+the bar is drawn.
+
+**The memo layer stays in `AnalyticsView` and the tabs render.** This is the
+load-bearing half of the arrangement rather than a matter of taste. The scope is
+resolved once, its outputs are held steady by value (`useStableList`,
+`useStableRange`), and every figure is derived from those stabilised values
+before a tab sees it. A tab that resolved its own scope would recompute on every
+clock tick and undo ADR-009's work, so **a tab takes computed figures as props
+and computes nothing for itself.** What a tab does own is its own presentation
+state — which item break-even is showing, which cut the revenue chart is on.
+
+The revenue PIN is a capability each tab declares — `'all' | 'money-columns' |
+'none'` — resolved in one place by `lockFor` and `resolveLock` (ADR-019).
+Nothing else in the section reads `revenueLocked` to decide whether to draw
+itself.
 
 ---
 
