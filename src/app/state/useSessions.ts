@@ -298,32 +298,77 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
   }, [snapshot, history]);
 
   /**
-   * Detaches a session from its event, and drops the event once it is empty.
+   * Detaches a session from its event. **The event stays**, however empty it
+   * gets.
    *
-   * An event with no sessions is not a fact about the business, only a leftover
-   * label, and leaving them behind fills the analytics scope picker with
-   * nothing.
+   * This used to delete the event once its last session left, on the reasoning
+   * that an event with no sessions is a leftover label rather than a fact about
+   * the business. That was right while events could only be created by
+   * grouping, because then a session-less event could only ever be a leftover.
+   * It is wrong now (ADR-021): a planned event with no sessions is exactly what
+   * "created on Thursday for Saturday" produces, and it is also what a
+   * mis-grouping being corrected produces one keystroke before the session is
+   * put back. Auto-delete destroys the plan in both cases, and undo is the only
+   * way back from something the shop never asked for.
+   *
+   * The concern the auto-delete was serving is real and is served differently:
+   * `eventGroups` excludes session-less events, so the analytics scope picker
+   * stays clean without anything being destroyed. Deleting is now a thing a
+   * person does, through `deleteEvent`.
    */
   const ungroup = useCallback((sessionId: string) => {
-    const target = snapshot.current.tradingSessions.find(s => s.id === sessionId);
-    if (!target?.eventId) return;
-    const eventId = target.eventId;
-    const beforeSessions = snapshot.current.tradingSessions;
+    moveSessionToEvent(sessionId, undefined);
+  }, [moveSessionToEvent]);
+
+  /**
+   * Removes an event. Its sessions are detached, not deleted.
+   *
+   * Refused while any cost is filed against the event itself. A `per-event`
+   * cost carries the event id and nothing else (ADR-012), so deleting the event
+   * out from under it leaves an amount pointing at a row that is not there:
+   * invisible to `costsForEvent` and to every event figure, and correct-looking
+   * wherever it was typed. `costEntryFromRow` demotes such a row on the way
+   * back in, which keeps the app openable at the price of quietly restating a
+   * market's pitch fee as one day's. Better to say so and let the shop move the
+   * cost first. The reason comes back to the caller so the manager can show it.
+   *
+   * Confirmed on undo and redo. It is the only deletion in this area, and what
+   * it takes with it — which sessions a market contained — is not obvious from
+   * the label alone (invariant 6).
+   */
+  const deleteEvent = useCallback((eventId: string): { ok: true } | { ok: false; reason: string } => {
     const beforeEvents = snapshot.current.tradingEvents;
-    const remaining = beforeSessions.filter(s => s.eventId === eventId && s.id !== sessionId);
-    const afterSessions = beforeSessions.map(s =>
-      s.id === sessionId ? { ...s, eventId: undefined } : s);
-    const afterEvents = remaining.length === 0
-      ? beforeEvents.filter(e => e.id !== eventId)
-      : beforeEvents;
-    setTradingSessions(afterSessions);
-    if (afterEvents !== beforeEvents) setTradingEvents(afterEvents);
+    const target = beforeEvents.find(e => e.id === eventId);
+    if (!target) return { ok: false, reason: 'That event is no longer here.' };
+
+    const filed = costsFiledAgainstEvent(snapshot.current.costEntries, eventId);
+    if (filed.length > 0) {
+      return {
+        ok: false,
+        reason: `${target.name} has ${filed.length} cost${filed.length === 1 ? '' : 's'} `
+          + 'charged to the whole event. Move or remove them first — deleting the event '
+          + 'would leave them attached to nothing, and they would drop out of every figure.',
+      };
+    }
+
+    const beforeSessions = snapshot.current.tradingSessions;
+    const members = beforeSessions.filter(s => s.eventId === eventId);
+    const afterEvents = beforeEvents.filter(e => e.id !== eventId);
+    const afterSessions = members.length === 0
+      ? beforeSessions
+      : beforeSessions.map(s => (s.eventId === eventId ? { ...s, eventId: undefined } : s));
+    setTradingEvents(afterEvents);
+    if (afterSessions !== beforeSessions) setTradingSessions(afterSessions);
     history.record({
-      label: `Took ${target.name} out of its event`,
+      label: `Deleted ${target.name}`,
       scope: 'session',
-      undo: () => { setTradingSessions(beforeSessions); setTradingEvents(beforeEvents); },
-      redo: () => { setTradingSessions(afterSessions); setTradingEvents(afterEvents); },
+      confirm: members.length === 0
+        ? `Put ${target.name} back?`
+        : `Put ${target.name} back, with its ${members.length} session${members.length === 1 ? '' : 's'}?`,
+      undo: () => { setTradingEvents(beforeEvents); setTradingSessions(beforeSessions); },
+      redo: () => { setTradingEvents(afterEvents); setTradingSessions(afterSessions); },
     });
+    return { ok: true };
   }, [snapshot, history]);
 
   /* ---------------------------------------------------------------- costs */
@@ -461,6 +506,7 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
       makeSessionAnEvent,
       addEvent,
       editEvent,
+      deleteEvent,
       ungroup,
       claimTicket,
       addCost,
