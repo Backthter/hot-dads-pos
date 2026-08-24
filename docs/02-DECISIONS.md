@@ -901,3 +901,226 @@ what changes is where the second argument comes from — a role rather than one
 global flag — and not what a tab has to declare. That is the reason this is a
 capability now, while there is exactly one tab that needs it, rather than an
 `if` that would have to be found again and turned into one.
+
+---
+
+## ADR-020 — An event may exist before its sessions, and an event of one is legitimate when a person declares it
+
+**Status:** accepted · 2026-08
+
+**Context:** `per-event` exists for one stated cost, from `01-DOMAIN.md`: *"the
+pitch fee for a three-day market is paid once, for the market, and splitting it
+across three days by hand is both tedious and wrong."*
+
+That cost could not be logged, at the only moment anyone would want to log it.
+
+An event could be brought into existence exactly one way: by ticking two or more
+already-traded sessions in the session panel and naming them. `handleGroupSessions`
+refused fewer than two, it always called `createEvent`, and there was no way to
+attach a session to an event that already existed. `handleStartSession` took a
+name and nothing else.
+
+So the sequence for a three-day market ran: trade Saturday; trade Sunday; group
+them; and only then does `per-event` become available, correctly disabled by
+ADR-018 until that moment. The pitch fee is paid on Saturday morning, before
+Sunday and Monday exist as anything at all. And day three could not be added to
+a group made on Sunday without ungrouping every day and grouping them again —
+during the market, between customers.
+
+The basis was unusable at the only time it was needed, and the shop's options
+were to type the fee as `per-session` against Saturday, which charges one day
+for three days' pitch and makes Saturday look unprofitable, or to wait until
+Monday night and re-file it, which nobody does.
+
+**Decision:** Three things, which are one thing.
+
+An event **may exist with no sessions**. `addEvent` creates one directly, with
+an optional planned start, planned end and venue. Those are a plan and never the
+record: what an event actually spans still comes from its sessions, exactly as
+before, and nothing derives membership or a reporting window from them. They
+exist so an event can be created on Thursday for Saturday, and so the manager
+can sort and label something that has not traded.
+
+An event **of one session is legitimate**. The two-session minimum is gone. A
+Saturday market that runs one service is one event and one session, and saying
+so is a statement about the business.
+
+A session **may start into an event**, and may be moved into or out of one
+afterwards. `startSession` takes an optional event — an existing one, a new one,
+or none — and **none is the default**, because most days are just days and a
+picker that demands an answer every morning gets dismissed every morning.
+`moveSessionToEvent` is the operation that was missing, and its absence is what
+made a three-day market ungroupable while it was happening.
+
+Status is **derived, never stored**: `eventStatus(event, sessions)` returns
+`planned` with no sessions, `active` while any session is active or paused, and
+`ended` when it has sessions and all of them have ended. A column would be a
+second source of truth about a fact the sessions already hold, and it would
+disagree the first time somebody resumed a session inside an ended event — the
+class of problem invariant 4 exists to prevent.
+
+**ADR-018 is complemented by this, not superseded, and both stand.**
+
+This matters enough to state twice, because the two entries read at a glance
+like a reversal. ADR-018 forbids **the program** inventing an event so that a
+basis stops being disabled. It gives two reasons and both survive intact:
+
+- Auto-creating an event of one when a lone session is scoped would make
+  ADR-013's held-cost distinction meaningless. The "event" and the session would
+  be the same period, so a cost filed against the event would be reported by
+  `heldEventCosts` as something the event carries *on top of* the session — a
+  cost the session already owes, stated twice, once as its own and once as
+  outstanding. The panel would then offer to switch to "the whole event" and
+  land on the figures it was already showing.
+- It invents a row nobody asked for, and puts a thing in the picker that the
+  shop did not make and cannot explain.
+
+**A person declaring an event is a different act.** "This Saturday is the Winter
+Market, and the pitch fee is the market's, not the day's" is a fact about the
+business, entered by someone who knows whether it is one. The shop that types it
+has decided that the day and the market are different things worth telling
+apart; the program deciding that on the shop's behalf, because a control was
+greyed out, has decided nothing and knows nothing.
+
+The held-cost reading is still slightly odd for an event of one — from that
+session's scope the pitch fee is held back and reported as the event's — and
+that is correct rather than a defect. It is the same statement ADR-013 makes for
+a three-day market: *this session's break-even covers this session's costs, and
+the market carries Rs X on top*. For an event of one the two scopes happen to
+cover the same trading, and the figures on each are still true of what they
+describe. The difference from the rejected auto-creation is that here the shop
+asked for the distinction and can see why it is being drawn.
+
+So the test is who acted, and `ResolvedScope.eventId` remains the honest one on
+the read side. `eventGroups` still presents a lone ungrouped session as an event
+of one with `grouped: false` and no event id, and every event figure still
+matches on a real id.
+
+**Rejected:** *Keeping the two-session minimum and telling people to group
+retroactively.* This is the status quo, and it is what makes `per-event`
+unusable at the time it is needed. It also asks the shop to hold a fact in their
+head across three days of trading and act on it afterwards, which is precisely
+the thing a point of sale is supposed to stop being necessary.
+
+Also rejected: *allowing an event of one only for a session that has ended.*
+It sounds like a safeguard and it removes the case the change exists for — the
+pitch fee is paid before the first session starts, not after the last one
+finishes.
+
+Also rejected: *storing the status.* A column, kept in step by whichever handler
+remembered to. See above; and note that `eventStatus` is pure and driven by
+`metrics.check.ts`, which a column would not be.
+
+Also rejected: *treating the planned dates as authoritative when an event has no
+sessions* — so that a planned event has a span, and analytics can scope to it.
+It reads as a convenience and it is a second definition of when an event
+happened, which would then disagree with the first the moment the market ran a
+day late. A plan is not a measurement. `EventListing.span` is `null` until
+something trades.
+
+**Consequences:** A shop can create the Winter Market on Thursday, start
+Saturday's session into it, and file the pitch fee against it on Saturday
+morning. Day three joins the same event while the market is running.
+
+A real event of one and a lone ungrouped session are **presented similarly and
+are not the same thing**. The manager distinguishes them visibly — events are
+listed as events with a status, ungrouped sessions are in a section of their
+own headed "Not in an event" — and `ResolvedScope.eventId` remains the test in
+code. `metrics.check.ts` asserts the difference in both directions.
+
+`makeSessionAnEvent(sessionId, name?)` is a handler on `useSessions` rather than
+something buried in the manager component, because 1C-ii-b's cost form links to
+it: a shop told that `per-event` is unavailable here needs one control that
+makes it available, and that control is a person pressing it.
+
+---
+
+## ADR-021 — Events are never auto-deleted; a session-less event is hidden from the picker rather than destroyed
+
+**Status:** accepted · 2026-08
+
+**Context:** `handleUngroupSession` deleted the event once its last session left
+it. The reasoning was written down and was right at the time: an event with no
+sessions is a leftover label rather than a fact about the business, and leaving
+them behind fills the analytics scope picker with periods that have nothing to
+report.
+
+That reasoning depended on a premise ADR-020 removes. While events could only be
+created by grouping, a session-less event could only ever be a leftover — there
+was no other way for one to come to exist. Now there are two others, and both
+are things the shop did on purpose:
+
+- An event created ahead of its sessions. "Created Thursday for Saturday"
+  produces a session-less event by definition, and auto-delete would not fire on
+  it only because nothing had been detached from it yet.
+- A mis-grouping being corrected. Take the wrong session out of a two-session
+  event, then the other, and the event is gone — one keystroke before the shop
+  puts the right ones back in.
+
+In both cases the shop loses something it made, silently, as a side effect of a
+different action.
+
+**Decision:** Nothing deletes an event on its own. `deleteEvent` is explicit and
+undoable, and detaching the last session leaves the event standing with status
+`planned`.
+
+The concern the auto-delete was serving is real, and is served by hiding rather
+than by destroying. The split is two functions over the same data:
+
+- **`eventGroups(events, sessions)`** is unchanged in meaning: groups of
+  sessions. It excludes session-less events, so `scopeOptions`, `resolveScope`,
+  `trendBuckets`, the workbook and the orders explorer see exactly what they saw
+  before. It was excluding them incidentally, because auto-delete meant they
+  could not occur; the exclusion is now explicit and checked.
+- **`allEvents(events, sessions)`** is new and is the manager's list: every
+  event, session-less ones included, each with its sessions, its derived status
+  and its real span or `null`.
+
+`eventGroups` deliberately does **not** return groups with zero sessions. Several
+consumers index `group.sessions[0]` or hand the list to `spanOf`, and an empty
+group is wrong at those sites rather than merely empty — `spanOf` returns `null`
+for an empty set on purpose, and the callers that index the first session would
+read `undefined.startedAt`.
+
+`deleteEvent` **refuses while any cost is filed against the event itself**. A
+`per-event` cost carries the event id and nothing else (ADR-012), so deleting
+the event leaves an amount pointing at a row that is not there: invisible to
+`costsForEvent`, invisible to every event figure, and correct-looking wherever
+it was typed. `costEntryFromRow` would demote it to `per-session` on the next
+load, which keeps the till openable at the price of quietly restating a market's
+pitch fee as one day's. The refusal names the count and says what to do.
+
+**Rejected:** *Auto-delete, kept as it was.* It destroys a plan, and it does so
+as a side effect of an unrelated action. Undo recovers it, which is not the same
+as it not having happened — the shop has to notice first.
+
+Also rejected: *showing session-less events in the scope picker.* This is the
+tidy version — one list, no split — and it fills the picker with periods that
+have no orders, no costs, no trading hours and nothing to report. The picker's
+job is to choose what to look at, and a planned market is not something to look
+at yet.
+
+Also rejected: *auto-deleting only events that were created by grouping*, by
+recording how each one came into being. It preserves both behaviours and it adds
+a field whose only purpose is to make deletion conditional on history. An event
+created by grouping and then emptied is just as likely to be a correction in
+progress.
+
+Also rejected: *deleting the event and the costs filed against it together.*
+Costs are money that was spent; removing a label is not a reason to forget an
+outlay, and it would be the one place in the app where deleting a grouping
+destroys a financial record.
+
+Also rejected: *deleting the event and demoting its costs to `per-session`*,
+which is what the load path does for a malformed row. There the demotion is a
+last resort so the app can open. Here there is a person present who can be
+asked, and demoting silently restates a market's pitch fee as one day's — the
+exact misstatement `per-event` exists to prevent.
+
+**Consequences:** A session-less event appears in the manager and not in the
+`ScopePicker`. It can be started into, moved into, edited, and filed against;
+what it cannot do is be reported on, because there is nothing to report.
+
+`eventGroups` and `allEvents` answer different questions and a later phase must
+not merge them. `metrics.check.ts` asserts both halves — that no group is ever
+empty, and that `allEvents` keeps what `eventGroups` drops.

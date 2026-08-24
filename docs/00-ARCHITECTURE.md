@@ -233,9 +233,16 @@ Three tables are exceptions, and the exception is the point:
 - **`oversell_events`** — known ids are skipped.
 - **`inventory_snapshots`** — keyed on (date, item) and written once a day.
 
-`orders`, `trading_sessions` and `trading_events` are never deleted here either,
-for the reasons in ADR-002 and ADR-003, though they are otherwise replaced
-normally.
+`orders` and `trading_sessions` are never deleted here either, for the reasons
+in ADR-002 and ADR-003, though they are otherwise replaced normally.
+
+**`trading_events` is the one grouping table that does delete**, and this
+paragraph used to say otherwise — the block has always issued a `DELETE` for an
+event that has left state, detaching its sessions first rather than cascading,
+because an event is only a grouping and removing one must never take its
+sessions' orders with it. What changed in Phase 1C-ii-a is what reaches that
+line: nothing removes an event on its own any more (ADR-021), so the only way a
+row disappears from state is a person calling `deleteEvent`.
 
 ---
 

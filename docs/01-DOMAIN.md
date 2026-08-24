@@ -113,6 +113,13 @@ hours on Saturday and four on Sunday traded for eight and not for thirty-two.
 `ticketCounter` is the highest ticket issued so far. Resuming continues from
 there rather than restarting, so no two tickets in one session share a number.
 
+A session can be **started into an event** — an existing one, a new one named on
+the spot, or none. None is the default and the common case: most days are just
+days, and a picker that demands an answer every morning gets dismissed every
+morning. A session can also be moved into an event, or out of one, afterwards
+(`moveSessionToEvent`), which is what makes a three-day market groupable while
+it is still running rather than only once it is over.
+
 Membership is stored on the order, never derived from the session's span
 (invariant 4).
 
@@ -129,11 +136,92 @@ three services is one event and three sessions.
 The grouping is stored rather than guessed, because dates cannot tell three days
 of one market apart from three unrelated markets in the same week.
 
-`eventGroups` in `src/app/lib/sessions.ts` presents every event, *plus each
-ungrouped session as an event of one*, so reporting "by event" covers sessions
-nobody bothered to group. Detaching the last session from an event deletes the
-event, because an event with no sessions is a leftover label rather than a fact
-about the business.
+**An event may exist before any of its sessions do** (ADR-020). It is created
+directly, or by grouping sessions after the fact, or by a session being started
+into it. The three routes produce the same row.
+
+### The plan is not the record
+
+`plannedStart`, `plannedEnd` and `venue` are optional, and the first two are
+**only ever a plan**. What an event actually spans still comes from its
+sessions, exactly as it always has: `eventGroups` reads the members' timestamps,
+`spanOf` measures the members, and every figure scoped to an event resolves
+through them. Nothing consults the planned dates for any of that.
+
+They exist so an event can be created on Thursday for Saturday — before any
+session exists to say when it ran — and so the manager can sort and label
+something that has not traded. A plan that says Saturday to Monday over sessions
+that ran Friday and Saturday is a wrong plan, not a wrong event.
+
+Said at length because the next reader will assume they are the truth. Deriving
+membership or a reporting window from them re-introduces exactly the guess
+invariant 4 exists to prevent.
+
+### Status is derived
+
+`eventStatus(event, sessions)` in `src/app/lib/sessions.ts` returns one of three
+words, and there is no column behind it:
+
+| Status | When |
+|---|---|
+| `planned` | no sessions |
+| `active` | at least one session is active **or paused** |
+| `ended` | it has sessions and all of them have ended |
+
+Paused counts as active because a market that stops at dusk and picks up in the
+morning is still running; calling it ended overnight is the calendar-day mistake
+invariant 4 was written against.
+
+Storing the status would create a second source of truth that drifts the first
+time somebody resumes a session inside an ended event — the sessions would say
+one thing and the column another, with nothing to say which was right.
+
+### An event of one
+
+One session is enough, **when a person declares it** (ADR-020). A Saturday
+market run as one service is one event and one session, and saying so is what
+lets the pitch fee be charged to the market rather than to the day.
+
+This complements ADR-018 and does not supersede it. What ADR-018 forbids is *the
+program* inventing an event so a basis stops being disabled; a person naming one
+is a different act. Read the two entries together — both stand.
+
+**A real event of one and a lone ungrouped session are presented similarly and
+are not the same thing.** `eventGroups` reports `grouped: true` and the event's
+id for the first, and `grouped: false` and the *session's* id for the second.
+`ResolvedScope.eventId` is the honest test in code, and the manager distinguishes
+them visibly: events are listed as events with a status, and ungrouped sessions
+sit in a section headed **Not in an event**.
+
+### Events are never auto-deleted
+
+Detaching the last session used to delete the event. It does not now (ADR-021):
+a session-less event is what "created Thursday for Saturday" produces, and it is
+also what correcting a mis-grouping produces one keystroke before the right
+sessions go back in. Removal is explicit, through `deleteEvent`, and undoable.
+
+`deleteEvent` **refuses while a cost is filed against the event itself**. A
+`per-event` cost carries the event id and nothing else, so deleting the event
+would leave the amount pointing at a row that is gone — invisible to
+`costsForEvent` and to every event figure, and correct-looking wherever it was
+typed.
+
+### `eventGroups` and `allEvents`
+
+Two functions over the same data, answering different questions. They must not
+be merged.
+
+- **`eventGroups(events, sessions)`** — *what can be reported on*. Every event
+  **that has sessions**, plus each ungrouped session presented as an event of
+  one, so reporting "by event" covers sessions nobody bothered to group.
+  Session-less events are excluded, which is what keeps them out of
+  `ScopePicker`: there is nothing to report on a period that has not traded.
+  It never returns a group with zero sessions, and several consumers depend on
+  that — they index `group.sessions[0]` or hand the list to `spanOf`.
+- **`allEvents(events, sessions)`** — *what events exist*. Every event,
+  session-less ones included, each with its members, its derived status, and its
+  real span or `null`. This is the manager's list. Ungrouped sessions are not in
+  it, because they are not events; `ungroupedSessions` is that list.
 
 ---
 
