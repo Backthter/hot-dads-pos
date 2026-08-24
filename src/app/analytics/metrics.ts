@@ -1,4 +1,4 @@
-import { resolveDealComponent, unitCostFor } from '../lib/inventory';
+import { effectiveMovements, resolveDealComponent, unitCostFor } from '../lib/inventory';
 import { sessionTradingHours } from '../lib/sessions';
 import type {
   CartItem, CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
@@ -715,6 +715,10 @@ export function breakEvenByItem(
  * only definition of a purchase in the program; `foodCost` calls straight into
  * it rather than keeping a second one, which is how the two came to disagree
  * about the same delivery.
+ *
+ * **Effective rows only** (ADR-017). A delivery that was undone is not an
+ * outlay, and both halves of the reversal carry `reversed`, so excluding them
+ * needs no pairing and survives a ledger trim.
  */
 export function stockPurchasesValue(
   movements: StockMovement[],
@@ -723,9 +727,9 @@ export function stockPurchasesValue(
   to: number,
 ): number {
   let total = 0;
-  for (const m of movements) {
+  for (const m of effectiveMovements(movements)) {
     if (m.timestamp < from || m.timestamp >= to) continue;
-    if (m.delta <= 0 || m.reversed) continue;
+    if (m.delta <= 0) continue;
     if (m.reason !== 'added' && m.reason !== 'packet') continue;
     const unit = m.unitCost ?? stockItems.find(s => s.id === m.stockItemId)?.costPerUnit ?? 0;
     total += m.totalCost ?? unit * m.delta;
@@ -794,7 +798,14 @@ export function inventoryValue(stockItems: StockItem[]): InventoryValue {
   };
 }
 
-/** Waste and stock-take shrinkage, valued at the item's cost. */
+/**
+ * Waste and stock-take shrinkage, valued at the item's cost.
+ *
+ * Economics, so it reads `effectiveMovements` (ADR-017): waste that was undone
+ * was never thrown away, and an undone count is not a finding. A genuine
+ * correction is not a reversal and still reaches this — that distinction is the
+ * point of the two reasons being separate.
+ */
 export function shrinkageValue(
   movements: StockMovement[],
   stockItems: StockItem[],
@@ -802,7 +813,7 @@ export function shrinkageValue(
 ): { waste: number; variance: number } {
   let waste = 0;
   let variance = 0;
-  for (const m of movements) {
+  for (const m of effectiveMovements(movements)) {
     if (m.timestamp < range.start || m.timestamp >= range.end) continue;
     if (m.delta >= 0) continue;
     const item = stockItems.find(s => s.id === m.stockItemId);
@@ -1516,6 +1527,13 @@ export interface TurnoverStats {
  * Average inventory comes from the daily snapshots rather than from opening and
  * closing alone: a stall that buys in on Friday and sells out on Sunday has an
  * opening and closing value that describe neither.
+ *
+ * It reads no stock movements, so there is nothing here for
+ * `effectiveMovements` to filter. Both inputs are already effective by
+ * construction: `totals.cogs` is the sum of frozen line costs on live orders,
+ * and a snapshot is a measurement of the shelf, which a reversal genuinely
+ * moved. Named because ADR-017 lists this among the economic figures and a
+ * reader will come looking for the call that is not here.
  */
 export function inventoryTurnover(
   totals: Totals,
@@ -1573,6 +1591,10 @@ export interface DeadStockItem {
  * logged if it has never sold at all — which is the worse case, and would be
  * invisible if items with no sales were skipped for having no date to measure
  * from.
+ *
+ * Reads `effectiveMovements` (ADR-017). A sale that was undone is not evidence
+ * the item moved, and an undone receipt is not evidence we have known about it
+ * since then — both would make dead stock look alive.
  */
 export function deadStock(
   stockItems: StockItem[],
@@ -1583,7 +1605,7 @@ export function deadStock(
   const lastSold = new Map<string, number>();
   const firstSeen = new Map<string, number>();
 
-  for (const m of movements) {
+  for (const m of effectiveMovements(movements)) {
     if (!firstSeen.has(m.stockItemId) || m.timestamp < firstSeen.get(m.stockItemId)!) {
       firstSeen.set(m.stockItemId, m.timestamp);
     }
@@ -1662,8 +1684,20 @@ export interface FoodCost {
  * its first movement's `resulting − delta` is exactly the level it started
  * from, which is the level at the mark. Treating it as zero instead would make
  * every stock item look as though it appeared out of nowhere.
+ *
+ * **This must NOT read `effectiveMovements`, and that is not an oversight.**
+ * Convention 6 and ADR-017: *effective for economics, every row for levels.*
+ * A reversal is bookkeeping to the money figures, but it genuinely moved the
+ * shelf, and `resulting` is the level it left behind. Filter it out here and
+ * the last surviving line at or before the mark is the wrong one, so every
+ * historical level — and both ends of `foodCost` — silently shifts by the
+ * reversed amount. The figures stay plausible; they stop being true. If you
+ * came here to make this consistent with `stockPurchasesValue`, read ADR-017
+ * first.
+ *
+ * Exported only so `metrics.check.ts` can hold this to its word.
  */
-function ledgerLevelsAt(movements: StockMovement[], at: number): Map<string, number> {
+export function ledgerLevelsAt(movements: StockMovement[], at: number): Map<string, number> {
   const levels = new Map<string, number>();
   const resolved = new Set<string>();
 
@@ -1747,8 +1781,10 @@ export function foodCost(
    */
   const purchases = stockPurchasesValue(movements, stockItems, range.start, range.end);
 
+  // A count that was undone is not a count. `basis` is a claim about how much
+  // the closing figure can be trusted, so it reads effective rows (ADR-017).
   let countedAt: number | null = null;
-  for (const m of movements) {
+  for (const m of effectiveMovements(movements)) {
     if (m.timestamp < range.start || m.timestamp >= range.end) continue;
     if (m.reason === 'stocktake' && (countedAt === null || m.timestamp > countedAt)) {
       countedAt = m.timestamp;
@@ -1771,6 +1807,11 @@ export function foodCost(
    * level throughout everything earlier. That is a real measurement of stock
    * whose arrival was never recorded — strictly better than assuming an empty
    * shelf, and it is what lets "All time" report an actual cost at all.
+   *
+   * Note which rule applies where. `purchases` above is money, so it reads
+   * effective rows only. The two ends here are *levels*, so they read the whole
+   * ledger — `ledgerValueAt` is deliberately unfiltered, and its comment says
+   * why. Both halves of this calculation are correct for opposite reasons.
    */
   const openingValue = hasLedger
     ? ledgerValueAt(movements, stockItems, range.start)

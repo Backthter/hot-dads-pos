@@ -343,6 +343,16 @@ export interface StockItem {
   iconId?: string;
 }
 
+/**
+ * Why a line was written.
+ *
+ * `correction` and `reversal` look alike on the shelf and mean opposite things
+ * (ADR-016). A **correction** is a person saying the shelf disagrees with the
+ * book: a measurement, carrying no cost, of stock that was already there. A
+ * **reversal** is the program undoing something it did: bookkeeping, never a
+ * purchase and never a count. Reading one as the other is how an undone
+ * delivery went on being counted as money spent.
+ */
 export type StockMovementReason =
   | 'added'       // typed in by hand
   | 'packet'      // added as N packets
@@ -350,6 +360,7 @@ export type StockMovementReason =
   | 'returned'    // given back when an order was edited down
   | 'waste'       // spillage, spoilage
   | 'correction'  // manual fix
+  | 'reversal'    // the program undoing itself — bookkeeping, never an event
   | 'edit'        // amount changed from the stock editor
   | 'drained'     // deliberately emptied — end of a market, a spoiled batch
   | 'stocktake';  // set during a count
@@ -383,7 +394,15 @@ export interface StockMovement {
   unitCost?: number;
   /** What the whole delivery cost, as typed in. */
   totalCost?: number;
-  /** Set on the reversal, and on the line it reverses, so both can be hidden. */
+  /**
+   * Set on the reversal, and on the line it reverses, so both can be hidden.
+   *
+   * Set centrally, in `buildMovement` for the reversal itself and in
+   * `useStock`'s append path for the row it points at — never at a call site
+   * (ADR-016). Because both halves carry it, a reader excluding reversed rows
+   * needs no pairing logic and stays correct when the ledger cap trims one half
+   * away. This is the one mutable field on a movement; see invariant 1.
+   */
   reversed?: boolean;
   timestamp: number;
 }

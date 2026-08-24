@@ -293,6 +293,16 @@ export function newMovementId(): string {
   return `mv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * Builds one ledger line.
+ *
+ * A `reversal` is marked `reversed` here rather than at the call site, and that
+ * placement is the whole point (ADR-016). Two write paths used to produce
+ * reversals — one marked both rows, one marked nothing — and every economic
+ * reader skipped `reversed`, so a delivery undone through the unmarked path
+ * left its original still counted as money spent. Marking on the way in means a
+ * new write path cannot forget.
+ */
 export function buildMovement(
   stockItem: StockItem,
   delta: number,
@@ -306,6 +316,7 @@ export function buildMovement(
     resulting: Math.max(0, stockItem.quantity + delta),
     reason,
     note,
+    ...(reason === 'reversal' ? { reversed: true } : {}),
     timestamp: Date.now(),
   };
 }
@@ -317,10 +328,31 @@ export const MOVEMENT_LABELS: Record<StockMovementReason, string> = {
   returned: 'Returned from edit',
   waste: 'Waste',
   correction: 'Correction',
+  // What the user did was undo something. "Reversal" is the bookkeeping word,
+  // and the ledger is read by someone standing at a counter.
+  reversal: 'Undone',
   edit: 'Edited',
   drained: 'Drained',
   stocktake: 'Stock take',
 };
+
+/**
+ * Movements that represent real events.
+ *
+ * `reversed` is set on both rows of a reversal pair, so this needs no pairing
+ * logic — which matters, because `applyStockChanges` caps the ledger at 20,000
+ * lines (ADR-001) and a trim can drop one half of a pair. An orphaned half is
+ * still marked and still excluded.
+ *
+ * **Economics only.** Every figure about money or usage reads through this:
+ * purchases, food cost, shrinkage, dead stock, consumption rate. Historical
+ * *levels* must not — a reversal genuinely moved the shelf, and `resulting`
+ * records where it left it. See ADR-017, and convention 6 in
+ * docs/03-INVARIANTS.md: effective for economics, every row for levels.
+ */
+export function effectiveMovements(all: StockMovement[]): StockMovement[] {
+  return all.filter(m => !m.reversed);
+}
 
 /* --------------------------------------------------------- usage & reorder */
 
@@ -365,6 +397,10 @@ export interface ConsumptionRate {
  * Only movements representing stock leaving — sales and waste — count.
  * Additions, corrections and stock takes are ignored, or restocking would read
  * as consumption.
+ *
+ * This is a figure about usage, so it reads `effectiveMovements`: a sale that
+ * was undone did not consume anything, and counting it would make an item look
+ * as though it were running out faster than it is.
  */
 export function consumptionRate(
   movements: StockMovement[],
@@ -378,7 +414,7 @@ export function consumptionRate(
   let samples = 0;
   let earliest = now;
 
-  for (const m of movements) {
+  for (const m of effectiveMovements(movements)) {
     if (m.stockItemId !== stockItemId) continue;
     if (m.timestamp < since) continue;
     if (m.delta >= 0) continue;

@@ -30,6 +30,28 @@ export interface StockChange {
   referenceId?: string;
   /** What the whole delivery cost, when this change is a receipt. */
   totalCost?: number;
+  /**
+   * Cost of one base unit, when the caller already knows it.
+   *
+   * Used by a restore, which duplicates the original line's cost rather than
+   * re-deriving it. Left unset everywhere else, where it is worked out from
+   * `totalCost` and what actually landed.
+   */
+  unitCost?: number;
+}
+
+/** One row to reverse: the change it made, and the line that recorded it. */
+export interface StockReversal {
+  itemId: string;
+  /** The delta of the original line. The reversal posts its opposite. */
+  delta: number;
+  /**
+   * The row being reversed, so both halves can be marked. Optional only
+   * because a caller may be reversing a change no line survives for; without
+   * it the reversal is still excluded from every economic figure, but its
+   * original is not, which is the defect ADR-016 exists to prevent.
+   */
+  movementId?: string;
 }
 
 /**
@@ -63,6 +85,35 @@ export function useStock(core: StateCore, deps: StockDeps) {
   /* ------------------------------------------------------- the primitives */
 
   /**
+   * Appends ledger lines, and marks whatever a reversal points back at.
+   *
+   * Every write to the ledger goes through here, which is the point. The
+   * defect ADR-016 fixes was two write paths that disagreed about whether to
+   * mark the row being reversed — one did, one did not, and every economic
+   * reader skipped `reversed`, so an undone delivery went on counting as money
+   * spent. Marking centrally means a third write path cannot reintroduce it.
+   *
+   * The reversal line itself is already marked by `buildMovement`; this marks
+   * the other half.
+   */
+  const appendMovements = useCallback((lines: StockMovement[]) => {
+    if (lines.length === 0) return;
+    const reversedIds = new Set(
+      lines
+        .filter(m => m.reason === 'reversal' && m.referenceType === 'movement' && m.referenceId)
+        .map(m => m.referenceId!),
+    );
+    setStockMovements(prev => {
+      // `reversed` is the one field that may change on an existing row —
+      // invariant 1 permits exactly this and nothing else.
+      const marked = reversedIds.size === 0
+        ? prev
+        : prev.map(m => (reversedIds.has(m.id) ? { ...m, reversed: true } : m));
+      return [...marked, ...lines].slice(-MOVEMENT_LIMIT);
+    });
+  }, []);
+
+  /**
    * Applies a set of stock changes and records one ledger line per item.
    *
    * A receipt that carries `totalCost` also re-averages the item's cost per
@@ -70,9 +121,14 @@ export function useStock(core: StateCore, deps: StockDeps) {
    * new one, over the combined quantity. That is the only way a cost figure
    * stays true without anyone remembering to maintain it — and every margin in
    * the analytics layer depends on it.
+   *
+   * Returns the lines it wrote. A caller that may later have to reverse itself
+   * needs their ids: reversing by matching a negative row against a prior
+   * positive one is the inference ADR-016 rejects, because a ledger trim can
+   * leave nothing to match against.
    */
-  const applyStockChanges = useCallback((changes: StockChange[]) => {
-    if (changes.length === 0) return;
+  const applyStockChanges = useCallback((changes: StockChange[]): StockMovement[] => {
+    if (changes.length === 0) return [];
     const current = snapshot.current.stockItems;
     const movements: StockMovement[] = [];
 
@@ -87,9 +143,9 @@ export function useStock(core: StateCore, deps: StockDeps) {
         if (change.delta === 0) continue;
         const applied = change.delta < 0 ? -Math.min(quantity, -change.delta) : change.delta;
 
-        let unitCost: number | undefined;
+        let unitCost: number | undefined = change.unitCost;
         if (change.totalCost !== undefined && change.totalCost > 0 && applied > 0) {
-          unitCost = change.totalCost / applied;
+          unitCost ??= change.totalCost / applied;
           // Weighted average of what is already here and what just arrived.
           const combined = quantity + applied;
           costPerUnit = combined > 0
@@ -111,13 +167,12 @@ export function useStock(core: StateCore, deps: StockDeps) {
     });
 
     setStockItems(next);
-    if (movements.length > 0) {
-      setStockMovements(prev => [...prev, ...movements].slice(-MOVEMENT_LIMIT));
-    }
-  }, [snapshot]);
+    appendMovements(movements);
+    return movements;
+  }, [snapshot, appendMovements]);
 
   /**
-   * Puts the shelf back where it was by appending correcting lines.
+   * Puts the shelf back where it was by appending reversing lines.
    *
    * This is the whole reason undo stores actions rather than snapshots. The
    * stock ledger is append-only on purpose: every line records the level it
@@ -125,16 +180,30 @@ export function useStock(core: StateCore, deps: StockDeps) {
    * at any past moment. Undoing a delivery by deleting the line that recorded
    * it would quietly rewrite that history — and worse, would leave the count on
    * the shelf disagreeing with the sum of the lines that produced it. So an
-   * undo posts the opposite movement, exactly as a person correcting a
-   * stocktake by hand would.
+   * undo posts the opposite movement.
+   *
+   * What it posts is a `reversal`, not a `correction` (ADR-016). A correction
+   * is a person saying the shelf disagrees with the book — a measurement, and
+   * under ADR-014 definitively not a purchase. The program undoing itself is
+   * neither, and using the same word for both is what let an undone delivery
+   * go on being counted as money spent: the original stayed a purchase and the
+   * line cancelling it counted as nothing.
    */
   const reverseStockChanges = useCallback((
-    changes: { itemId: string; delta: number }[],
+    changes: StockReversal[],
     note = 'Undone',
-  ) => {
-    applyStockChanges(changes
+  ): StockMovement[] => {
+    return applyStockChanges(changes
       .filter(c => c.delta !== 0)
-      .map(c => ({ itemId: c.itemId, delta: -c.delta, reason: 'correction' as StockMovementReason, note })));
+      .map(c => ({
+        itemId: c.itemId,
+        delta: -c.delta,
+        reason: 'reversal' as StockMovementReason,
+        note,
+        // Points at the row this cancels, so `appendMovements` can mark it.
+        referenceType: c.movementId ? ('movement' as const) : undefined,
+        referenceId: c.movementId,
+      })));
   }, [applyStockChanges]);
 
   /**
@@ -145,23 +214,37 @@ export function useStock(core: StateCore, deps: StockDeps) {
    * in the same edit, say. `reverseStockChanges` cannot serve here because it
    * works out the new list from the old one, so it would faithfully undo the
    * count while leaving the rename in place.
+   *
+   * `reason` is the caller's, because this is a third write path and the two
+   * cases it serves are opposite ones. Undoing an edit is a `reversal` and
+   * carries the id of the line it cancels; redoing one is an `edit` again,
+   * which is a live event. Both go through `appendMovements`, so the marking
+   * rule is the same one every other path uses (ADR-016).
    */
   const applyItemsWithCorrection = useCallback((
     nextItems: StockItem[],
-    corrections: { itemId: string; delta: number }[],
+    corrections: { itemId: string; delta: number; movementId?: string }[],
     note: string,
-  ) => {
+    reason: StockMovementReason = 'correction',
+  ): StockMovement[] => {
     const previous = snapshot.current.stockItems;
     setStockItems(nextItems);
     const lines = corrections
       .filter(c => c.delta !== 0)
       .map(c => {
         const from = previous.find(s => s.id === c.itemId);
-        return from ? buildMovement(from, c.delta, 'correction', note) : null;
+        if (!from) return null;
+        const line: StockMovement = {
+          ...buildMovement(from, c.delta, reason, note),
+          referenceType: c.movementId ? 'movement' : undefined,
+          referenceId: c.movementId,
+        };
+        return line;
       })
       .filter((m): m is StockMovement => m !== null);
-    if (lines.length > 0) setStockMovements(prev => [...prev, ...lines]);
-  }, [snapshot]);
+    appendMovements(lines);
+    return lines;
+  }, [snapshot, appendMovements]);
 
   /* --------------------------------------------------------- carts & orders */
 
@@ -235,7 +318,15 @@ export function useStock(core: StateCore, deps: StockDeps) {
     itemId: string, delta: number, reason: StockMovementReason, note?: string, totalCost?: number,
   ) => {
     const item = snapshot.current.stockItems.find(s => s.id === itemId);
-    applyStockChanges([{ itemId, delta, reason, note, totalCost }]);
+    /**
+     * The lines currently standing for this change.
+     *
+     * Undo reverses whatever is standing, not whatever was written the first
+     * time. A redo appends a fresh live line, so the next undo has to cancel
+     * *that* one — reversing the original a second time would mark a row that
+     * is already marked and leave the redo counted as a live purchase for ever.
+     */
+    let standing = applyStockChanges([{ itemId, delta, reason, note, totalCost }]);
 
     if (item && delta !== 0) {
       const amount = formatQuantityLabel(Math.abs(delta), item.unit);
@@ -245,8 +336,16 @@ export function useStock(core: StateCore, deps: StockDeps) {
         confirm: reason === 'waste'
           ? `This will put ${amount} of ${item.name} back on the shelf, as though the waste had never been written off.`
           : undefined,
-        undo: () => reverseStockChanges([{ itemId, delta }]),
-        redo: () => applyStockChanges([{ itemId, delta, reason, note, totalCost }]),
+        undo: () => {
+          reverseStockChanges(
+            standing.map(m => ({ itemId: m.stockItemId, delta: m.delta, movementId: m.id })));
+          standing = [];
+        },
+        // A redo restores the original's meaning: same reason, same cost, a
+        // live line of its own (ADR-016). The undone pair stays netted out.
+        redo: () => {
+          standing = applyStockChanges([{ itemId, delta, reason, note, totalCost }]);
+        },
       });
     }
     await saveImmediate();
@@ -280,19 +379,34 @@ export function useStock(core: StateCore, deps: StockDeps) {
     const delta = item.quantity - existing.quantity;
     const next = before.map(s => (s.id === item.id ? item : s));
     setStockItems(next);
+    // The line standing for the count, so undo can cancel the one that is
+    // actually there rather than the one written first. See `adjustStock`.
+    let standing: StockMovement[] = [];
     if (delta !== 0) {
-      setStockMovements(prev => [...prev, buildMovement(existing, delta, 'edit')]);
+      standing = [buildMovement(existing, delta, 'edit')];
+      appendMovements(standing);
     }
     history.record({
       label: `Edited ${item.name}`,
       scope: 'stock',
       // Fields and count go back together in one step: the list is set
       // outright and the ledger is told about the count on its own.
-      undo: () => applyItemsWithCorrection(before, [{ itemId: item.id, delta: -delta }], 'Edit undone'),
-      redo: () => applyItemsWithCorrection(next, [{ itemId: item.id, delta }], 'Edit redone'),
+      undo: () => {
+        applyItemsWithCorrection(
+          before,
+          standing.map(m => ({ itemId: m.stockItemId, delta: -m.delta, movementId: m.id })),
+          'Edit undone',
+          'reversal',
+        );
+        standing = [];
+      },
+      redo: () => {
+        standing = applyItemsWithCorrection(
+          next, [{ itemId: item.id, delta }], 'Edit redone', 'edit');
+      },
     });
     await saveImmediate({ stockItems: next });
-  }, [snapshot, saveImmediate, history, applyItemsWithCorrection]);
+  }, [snapshot, saveImmediate, history, applyItemsWithCorrection, appendMovements]);
 
   const setPacket = useCallback(async (
     itemId: string, size: number | null, label?: string, cost?: number,
@@ -326,6 +440,11 @@ export function useStock(core: StateCore, deps: StockDeps) {
    * are marked and hidden from the activity list — but the ledger stays
    * append-only, which is what lets historical stock be reconstructed at all.
    * Whatever undo/redo becomes later has to keep that property.
+   *
+   * This used to hand-roll the reversal and the marking, and
+   * `reverseStockChanges` hand-rolled a different one. They happened to agree
+   * about the shelf and disagreed about the books. There is now one path, and
+   * this is a caller of it (ADR-016).
    */
   const undoMovement = useCallback(async (movementId: string) => {
     const movement = snapshot.current.stockMovements.find(m => m.id === movementId);
@@ -333,34 +452,52 @@ export function useStock(core: StateCore, deps: StockDeps) {
     const item = snapshot.current.stockItems.find(s => s.id === movement.stockItemId);
     if (!item) return;
 
-    const quantity = Math.max(0, item.quantity - movement.delta);
-    const items = snapshot.current.stockItems.map(s => (
-      s.id === movement.stockItemId ? { ...s, quantity } : s
-    ));
-    const reversal: StockMovement = {
-      ...buildMovement(item, -movement.delta, 'correction', 'Undone'),
+    reverseStockChanges(
+      [{ itemId: movement.stockItemId, delta: movement.delta, movementId: movement.id }],
+      'Undone',
+    );
+
+    /**
+     * Restoring the delivery must restore what it *meant*, not merely its
+     * quantity.
+     *
+     * Posting the opposite of the reversal would append a second `reversal`
+     * carrying no cost, so an undone-then-restored Rs 8,000 delivery would sit
+     * on the shelf and be invisible to `stockPurchasesValue` and therefore to
+     * food cost. Instead this appends a line duplicating the original's
+     * semantics — the same reason and the same cost — pointing back at it. The
+     * original and its reversal stay netted out and the new line is a live
+     * receipt, counted exactly once. Append-only, no pairing, survives a trim.
+     */
+    const restoreChange: StockChange = {
+      itemId: movement.stockItemId,
+      delta: movement.delta,
+      reason: movement.reason,
+      note: 'Restored',
       referenceType: 'movement',
       referenceId: movement.id,
-      reversed: true,
+      unitCost: movement.unitCost,
+      totalCost: movement.totalCost,
     };
-    const movements = snapshot.current.stockMovements
-      .map(m => (m.id === movementId ? { ...m, reversed: true } : m))
-      .concat(reversal);
 
-    setStockItems(items);
-    setStockMovements(movements);
-
+    // What is standing for this delivery right now. Nothing, until a restore.
+    let standing: StockMovement[] = [];
     const named = item;
     history.record({
       label: `Undid a stock change to ${named.name}`,
       scope: 'stock',
-      // Redoing this is itself another correction, appended like any other.
-      undo: () => reverseStockChanges([{ itemId: movement.stockItemId, delta: -movement.delta }], 'Restored'),
-      redo: () => reverseStockChanges([{ itemId: movement.stockItemId, delta: movement.delta }], 'Undone'),
+      undo: () => { standing = applyStockChanges([restoreChange]); },
+      redo: () => {
+        reverseStockChanges(
+          standing.map(m => ({ itemId: m.stockItemId, delta: m.delta, movementId: m.id })),
+          'Undone',
+        );
+        standing = [];
+      },
     });
 
-    await saveImmediate({ stockItems: items, stockMovements: movements });
-  }, [snapshot, saveImmediate, history, reverseStockChanges]);
+    await saveImmediate();
+  }, [snapshot, saveImmediate, history, reverseStockChanges, applyStockChanges]);
 
   /**
    * Records a count. Each line writes the difference between what was counted
@@ -379,15 +516,22 @@ export function useStock(core: StateCore, deps: StockDeps) {
         referenceType: 'stocktake' as const,
       }));
     if (changes.length === 0) return;
-    applyStockChanges(changes);
+    let standing = applyStockChanges(changes);
 
     history.record({
       label: `Recorded a stock count of ${changes.length} item${changes.length === 1 ? '' : 's'}`,
       scope: 'stock',
       confirm:
         'A count is a measurement of what was really on the shelf, and the difference against what the app expected is where waste and over-portioning show up. Undoing it throws that finding away.',
-      undo: () => reverseStockChanges(changes.map(c => ({ itemId: c.itemId, delta: c.delta })), 'Count undone'),
-      redo: () => applyStockChanges(changes),
+      undo: () => {
+        reverseStockChanges(
+          standing.map(m => ({ itemId: m.stockItemId, delta: m.delta, movementId: m.id })),
+          'Count undone');
+        standing = [];
+      },
+      // A recounted count is a count again, not a reversal: it reaches
+      // shrinkage variance, which is the whole finding.
+      redo: () => { standing = applyStockChanges(changes); },
     });
 
     await saveImmediate();
@@ -414,7 +558,7 @@ export function useStock(core: StateCore, deps: StockDeps) {
       reason: 'drained' as StockMovementReason,
       note,
     }));
-    applyStockChanges(changes);
+    let standing = applyStockChanges(changes);
 
     history.record({
       label: items.length === 1
@@ -424,8 +568,14 @@ export function useStock(core: StateCore, deps: StockDeps) {
       confirm: items.length === 1
         ? `This puts ${formatQuantityLabel(items[0].quantity, items[0].unit)} of ${items[0].name} back on the shelf, as though it had never been emptied.`
         : `This puts everything back on the shelf across ${items.length} items, as though the shelf had never been emptied.`,
-      undo: () => reverseStockChanges(changes.map(c => ({ itemId: c.itemId, delta: c.delta })), 'Drain undone'),
-      redo: () => applyStockChanges(changes),
+      undo: () => {
+        reverseStockChanges(
+          standing.map(m => ({ itemId: m.stockItemId, delta: m.delta, movementId: m.id })),
+          'Drain undone');
+        standing = [];
+      },
+      // Draining again is a real write-off again, and still valued as a loss.
+      redo: () => { standing = applyStockChanges(changes); },
     });
 
     await saveImmediate();
