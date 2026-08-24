@@ -51,6 +51,16 @@ const HOUR = 3_600_000;
 const T = 1_700_000_000_000;
 const ALL = resolveRange('all', undefined, T + 100 * HOUR);
 
+// Snapshot dates are keyed by the app in *local* time (localDateKey in
+// metrics.ts), so a fixture that builds them with toISOString() hands the
+// aggregates UTC strings and drops rows whenever the two calendars disagree —
+// which they do at T's hour of day for any zone east of about UTC+2. Format
+// through the same local calendar the production code reads back.
+const localDay = (ms: number) => {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 function order(over: Partial<Order>): Order {
   return {
     id: 'o', seq: 1, orderNumber: '01', customerName: 'C', items: [], notes: '',
@@ -376,7 +386,7 @@ check('lift is coincidence', pairs[0].lift, 1);
 // against 400 the recipes account for: 2600 unexplained.
 console.log('\nFood cost');
 const snapshots: InventorySnapshot[] = [
-  { date: new Date(T - 48 * HOUR).toISOString().slice(0, 10), stockItemId: 's1', quantity: 100, unitCost: 50, value: 5000 },
+  { date: localDay(T - 48 * HOUR), stockItemId: 's1', quantity: 100, unitCost: 50, value: 5000 },
 ];
 const movements: StockMovement[] = [
   { id: 'm1', stockItemId: 's1', delta: 40, resulting: 140, reason: 'added', totalCost: 2000, timestamp: T + HOUR },
@@ -602,7 +612,7 @@ check('and moves the variance', counted.variance, (3000 + 2000 - 3900) - 400);
 /* --------------------------------------------------------------- turnover */
 // COGS 400 over an average stock value of 2000 is a fifth of a turn.
 console.log('\nInventory turnover');
-const day = (offset: number) => new Date(T + offset * 24 * HOUR).toISOString().slice(0, 10);
+const day = (offset: number) => localDay(T + offset * 24 * HOUR);
 const turn = inventoryTurnover(
   beTotals,
   [
