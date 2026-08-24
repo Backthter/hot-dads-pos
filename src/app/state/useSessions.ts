@@ -3,6 +3,7 @@ import { restoreAction, useHistory } from '../lib/history';
 import {
   assertCostEntry,
   costEntryIsCoherent,
+  costsFiledAgainstEvent,
   createEvent,
   describeCostAmount,
   endSession as closeSession,
@@ -10,6 +11,7 @@ import {
   pauseSession,
   resumeSession,
   startSession,
+  type EventDetails,
 } from '../lib/sessions';
 import type { StateCore } from './core';
 import type { ExplainNotUndoable } from './useNotUndoable';
@@ -131,13 +133,24 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
 
   /* ------------------------------------------------------------- grouping */
 
-  /** Groups sessions under one event, creating the event as a side effect. */
+  /**
+   * Groups sessions under one event, creating the event as a side effect.
+   *
+   * **One session is enough** (ADR-020). The two-session minimum this used to
+   * carry made an event something that could only exist after two days had been
+   * traded and grouped by hand, which is the wrong way round for the cost the
+   * basis exists for: the pitch fee for a three-day market is paid on Saturday
+   * morning, before Sunday and Monday exist as anything at all.
+   *
+   * ADR-018 is untouched by this and still stands. What it forbids is the
+   * *program* inventing an event so that a basis stops being disabled. Every
+   * route into this function is a person naming one.
+   */
   const group = useCallback((sessionIds: string[], eventName: string) => {
-    if (sessionIds.length < 2) return;
+    if (sessionIds.length < 1) return;
     const picked = snapshot.current.tradingSessions.filter(s => sessionIds.includes(s.id));
-    const fallback = picked.length > 0
-      ? `${picked[0].name.split('·')[0].trim() || 'Event'} run`
-      : 'Event';
+    if (picked.length === 0) return;
+    const fallback = `${picked[0].name.split('·')[0].trim() || 'Event'} run`;
     const beforeEvents = snapshot.current.tradingEvents;
     const beforeSessions = snapshot.current.tradingSessions;
     const event = createEvent(eventName || fallback, Date.now());
@@ -147,11 +160,80 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
     setTradingEvents(afterEvents);
     setTradingSessions(afterSessions);
     history.record({
-      label: `Grouped ${sessionIds.length} sessions into ${event.name}`,
+      label: sessionIds.length === 1
+        ? `Made ${picked[0].name} into ${event.name}`
+        : `Grouped ${sessionIds.length} sessions into ${event.name}`,
       scope: 'session',
       undo: () => { setTradingEvents(beforeEvents); setTradingSessions(beforeSessions); },
       redo: () => { setTradingEvents(afterEvents); setTradingSessions(afterSessions); },
     });
+  }, [snapshot, history]);
+
+  /**
+   * Makes one session into an event of its own.
+   *
+   * This is `group` with one id, named separately because it is a different act
+   * with a different reason, and because 1C-ii-b's cost form links to it: a
+   * shop that has just been told `per-event` is unavailable here needs one
+   * control that makes it available, and that control cannot live buried inside
+   * a component. It is a handler on the hook so anything can call it.
+   *
+   * The distinction ADR-020 turns on is who is doing it. A person saying "this
+   * Saturday is the Winter Market, and the pitch fee is the market's not the
+   * day's" is stating a fact about their business. The program noticing that a
+   * basis is disabled and creating an event so that it is not is the thing
+   * ADR-018 rejected, and this must never be called from a code path that no
+   * one asked for.
+   */
+  const makeSessionAnEvent = useCallback((sessionId: string, eventName?: string) => {
+    const target = snapshot.current.tradingSessions.find(s => s.id === sessionId);
+    if (!target || target.eventId) return;
+    group([sessionId], eventName?.trim() || target.name);
+  }, [snapshot, group]);
+
+  /**
+   * Creates an event with nothing in it yet — the Thursday-for-Saturday case.
+   *
+   * A session-less event is `planned`, is in `allEvents`, and is deliberately
+   * not in `eventGroups`, so it appears in the manager and not in the analytics
+   * scope picker: there is nothing to report on a period that has not traded
+   * (ADR-021). What it *is* good for is being the thing a pitch fee is filed
+   * against on the morning it is paid.
+   */
+  const addEvent = useCallback((name: string, details?: EventDetails) => {
+    const beforeEvents = snapshot.current.tradingEvents;
+    const event = createEvent(name, Date.now(), details);
+    const afterEvents = [...beforeEvents, event];
+    setTradingEvents(afterEvents);
+    history.record(restoreAction(
+      `Created ${event.name}`, 'session', beforeEvents, afterEvents, setTradingEvents,
+    ));
+    return event;
+  }, [snapshot, history]);
+
+  /** Renames an event, or edits its plan. The sessions are untouched either way. */
+  const editEvent = useCallback((
+    eventId: string,
+    changes: { name?: string } & EventDetails,
+  ) => {
+    const before = snapshot.current.tradingEvents;
+    const target = before.find(e => e.id === eventId);
+    if (!target) return;
+    const name = changes.name?.trim();
+    const updated: TradingEvent = {
+      ...target,
+      ...(name ? { name } : {}),
+      plannedStart: changes.plannedStart,
+      plannedEnd: changes.plannedEnd,
+      venue: changes.venue?.trim() || undefined,
+      notes: changes.notes?.trim() || undefined,
+    };
+    const next = before.map(e => (e.id === eventId ? updated : e));
+    setTradingEvents(next);
+    history.record(restoreAction(
+      `Edited ${updated.name}`, 'session', before, next, setTradingEvents,
+      undefined, `event:${eventId}:details`,
+    ));
   }, [snapshot, history]);
 
   /**
@@ -314,6 +396,9 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
       end,
       rename,
       group,
+      makeSessionAnEvent,
+      addEvent,
+      editEvent,
       ungroup,
       claimTicket,
       addCost,

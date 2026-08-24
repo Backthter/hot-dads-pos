@@ -387,6 +387,23 @@ export function costsForEvent(
   ));
 }
 
+/**
+ * Costs filed against the event itself, rather than against one of its
+ * sessions.
+ *
+ * These are what makes deleting an event more than deleting a label. A
+ * `per-event` cost carries the event id and nothing else (ADR-012), so removing
+ * the event leaves an amount pointing at a row that is not there: invisible to
+ * `costsForEvent`, invisible to every event figure, and correct-looking
+ * wherever it was typed. `costEntryFromRow` demotes such a row on the way back
+ * in, which keeps the app openable but quietly restates a market's pitch fee as
+ * one day's. Refusing the deletion is the honest answer, and this is the list
+ * to refuse it with.
+ */
+export function costsFiledAgainstEvent(costs: CostEntry[], eventId: string): CostEntry[] {
+  return costs.filter(c => c.eventId === eventId);
+}
+
 /* ------------------------------------------------------------------- costs */
 
 /**
