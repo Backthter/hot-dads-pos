@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { restoreAction, useHistory } from '../lib/history';
-import { buildMovement, formatQuantityLabel } from '../lib/inventory';
+import { buildMovement, formatQuantityLabel, postMovements } from '../lib/inventory';
 import { stockUsageForCart } from '../lib/orders';
 import type { StateCore } from './core';
 import type { StockTakeLine } from '../inventory/StockTakeScreen';
@@ -54,15 +54,6 @@ export interface StockReversal {
   movementId?: string;
 }
 
-/**
- * How many ledger lines are kept in memory.
- *
- * Bounded, but far above a year of trading. Trimming is only safe at all
- * because a daily snapshot exists behind it — without one, dropping old lines
- * would make historical stock unreconstructable.
- */
-const MOVEMENT_LIMIT = 20_000;
-
 export interface StockDeps {
   /** Recipes. Read to resolve a cart, and cleared when an item is deleted. */
   assignments: MenuItemStockAssignment[];
@@ -85,32 +76,17 @@ export function useStock(core: StateCore, deps: StockDeps) {
   /* ------------------------------------------------------- the primitives */
 
   /**
-   * Appends ledger lines, and marks whatever a reversal points back at.
+   * The hook's one door to the ledger.
    *
-   * Every write to the ledger goes through here, which is the point. The
-   * defect ADR-016 fixes was two write paths that disagreed about whether to
-   * mark the row being reversed — one did, one did not, and every economic
-   * reader skipped `reversed`, so an undone delivery went on counting as money
-   * spent. Marking centrally means a third write path cannot reintroduce it.
-   *
-   * The reversal line itself is already marked by `buildMovement`; this marks
-   * the other half.
+   * Every write goes through `postMovements`, which appends and marks whatever
+   * a reversal points back at. The rule lives in `lib/inventory` rather than
+   * here so that it is pure and `metrics.check.ts` can hold it to its word —
+   * and so that a third write path in this file cannot reintroduce the
+   * disagreement ADR-016 fixes.
    */
   const appendMovements = useCallback((lines: StockMovement[]) => {
     if (lines.length === 0) return;
-    const reversedIds = new Set(
-      lines
-        .filter(m => m.reason === 'reversal' && m.referenceType === 'movement' && m.referenceId)
-        .map(m => m.referenceId!),
-    );
-    setStockMovements(prev => {
-      // `reversed` is the one field that may change on an existing row —
-      // invariant 1 permits exactly this and nothing else.
-      const marked = reversedIds.size === 0
-        ? prev
-        : prev.map(m => (reversedIds.has(m.id) ? { ...m, reversed: true } : m));
-      return [...marked, ...lines].slice(-MOVEMENT_LIMIT);
-    });
+    setStockMovements(prev => postMovements(prev, lines));
   }, []);
 
   /**

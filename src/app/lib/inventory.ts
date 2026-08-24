@@ -354,6 +354,46 @@ export function effectiveMovements(all: StockMovement[]): StockMovement[] {
   return all.filter(m => !m.reversed);
 }
 
+/**
+ * How many ledger lines are kept in memory.
+ *
+ * Bounded, but far above a year of trading. Trimming is only safe at all
+ * because a daily snapshot exists behind it — without one, dropping old lines
+ * would make historical stock unreconstructable.
+ */
+export const MOVEMENT_LIMIT = 20_000;
+
+/**
+ * Appends lines to a ledger, marking whatever a reversal points back at.
+ *
+ * Every write to the stock ledger goes through here. That is the fix ADR-016
+ * describes: there used to be two write paths producing reversals, one marking
+ * both rows and one marking nothing, and every economic reader skipped
+ * `reversed` — so a delivery undone through the unmarked path left its original
+ * still counted as money spent while the line cancelling it counted as nothing.
+ *
+ * The reversal line marks itself in `buildMovement`; this marks the other half.
+ * `reversed` is the one field that may change on an existing row, which
+ * invariant 1 permits explicitly and for exactly this.
+ *
+ * Pure, so `metrics.check.ts` can drive it without React.
+ */
+export function postMovements(
+  ledger: StockMovement[],
+  lines: StockMovement[],
+): StockMovement[] {
+  if (lines.length === 0) return ledger;
+  const reversedIds = new Set(
+    lines
+      .filter(m => m.reason === 'reversal' && m.referenceType === 'movement' && m.referenceId)
+      .map(m => m.referenceId!),
+  );
+  const marked = reversedIds.size === 0
+    ? ledger
+    : ledger.map(m => (reversedIds.has(m.id) ? { ...m, reversed: true } : m));
+  return [...marked, ...lines].slice(-MOVEMENT_LIMIT);
+}
+
 /* --------------------------------------------------------- usage & reorder */
 
 const DAY = 24 * 60 * 60 * 1000;

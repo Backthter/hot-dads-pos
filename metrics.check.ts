@@ -7,9 +7,10 @@
  */
 import {
   BREAK_EVEN_BLOCKED, attachmentPairs, breakEven, breakEvenByItem, costSummary, deadStock,
-  foodCost, inventoryTurnover, itemMargins, itemPerformance, queueBands, resolveRange,
-  stockPurchasesValue, stockoutStats, totalsFor, voidStats,
+  foodCost, inventoryTurnover, itemMargins, itemPerformance, ledgerLevelsAt, queueBands,
+  resolveRange, shrinkageValue, stockPurchasesValue, stockoutStats, totalsFor, voidStats,
 } from './src/app/analytics/metrics';
+import { buildMovement, effectiveMovements, postMovements } from './src/app/lib/inventory';
 import {
   costEntryIsCoherent, costsForEvent, endSession, needsRefiling, pauseSession, resumeSession,
   sessionTradingHours, startSession,
@@ -431,6 +432,129 @@ const throughFoodCost = foodCost(
 check('receipts only', directly, 2500);
 check('food cost agrees exactly', throughFoodCost, directly);
 check('the correction is not an outlay', directly, 2500);
+
+/* ------------------------------------------------- an undone delivery (1B) */
+/*
+ * The regression this phase exists for.
+ *
+ * Reversals used to be written two ways. `undoMovement` appended its
+ * compensating line and marked both rows `reversed`; `reverseStockChanges`
+ * posted a plain negative `correction` and marked nothing. Every purchase
+ * figure skips `reversed` rows, so a delivery undone through the second path
+ * left its original `added` still counted while the line cancelling it counted
+ * as nothing — and after ADR-014 made a correction definitively not a purchase,
+ * the compensating line *could* not cancel it. The shelf was right and the
+ * books were wrong, in the direction that overstates outlay.
+ *
+ * Both paths now build the same line through `buildMovement` and post it
+ * through `postMovements`, so what is checked below is the one thing they share
+ * rather than two implementations that happen to agree.
+ */
+console.log('\nAn undone delivery — the regression');
+
+const mince = stock[0];
+const DELIVERY = 8000;
+const stamp = (m: StockMovement, over: Partial<StockMovement>): StockMovement => ({ ...m, ...over });
+
+// Rs 8,000 of mince arrives: 80 on the shelf becomes 180.
+const delivery = stamp(buildMovement(mince, 100, 'added', 'Delivery'), {
+  id: 'd1', totalCost: DELIVERY, timestamp: T + HOUR,
+});
+const received = postMovements([], [delivery]);
+
+/** A reversal, as `reverseStockChanges` now builds one, whichever path called it. */
+const reversalOf = (original: StockMovement, id: string, ts: number): StockMovement => stamp(
+  buildMovement({ ...mince, quantity: original.resulting }, -original.delta, 'reversal', 'Undone'),
+  { id, referenceType: 'movement', referenceId: original.id, timestamp: ts },
+);
+
+// Path one: the ledger's own undo, from stock history.
+const undoneByLedger = postMovements(received, [reversalOf(delivery, 'r1', T + 2 * HOUR)]);
+// Path two: the order/stock path, which used to post an unmarked correction.
+const undoneByStock = postMovements(received, [reversalOf(delivery, 'r2', T + 2 * HOUR)]);
+
+// Restoring it duplicates the original's meaning rather than reversing the
+// reversal: same reason, same cost, a live line of its own. The undone pair
+// stays netted out, so this is counted once and not twice.
+const restored = postMovements(undoneByLedger, [stamp(
+  buildMovement({ ...mince, quantity: 80 }, 100, delivery.reason, 'Restored'),
+  {
+    id: 'd2', referenceType: 'movement', referenceId: delivery.id,
+    unitCost: delivery.unitCost, totalCost: delivery.totalCost, timestamp: T + 3 * HOUR,
+  },
+)]);
+
+const led = { start: T, end: T + 10 * HOUR, label: 'ledger' };
+const spent = (ms: StockMovement[]) => stockPurchasesValue(ms, stock, led.start, led.end);
+const spentViaFoodCost = (ms: StockMovement[]) =>
+  foodCost(beTotals, ms, [], stock, led, T + 50 * HOUR).purchases;
+
+check('a reversal marks itself', buildMovement(mince, -100, 'reversal').reversed, true);
+check('a correction does not', buildMovement(mince, 5, 'correction').reversed, undefined);
+check('received: counted once', spent(received), DELIVERY);
+check('received: food cost agrees', spentViaFoodCost(received), DELIVERY);
+check('undone via the ledger: nothing', spent(undoneByLedger), 0);
+check('undone via stock: nothing', spent(undoneByStock), 0);
+check('both undo paths agree', spent(undoneByStock), spent(undoneByLedger));
+check('undone: food cost agrees', spentViaFoodCost(undoneByLedger), 0);
+check('the original is marked too', undoneByLedger.find(m => m.id === 'd1')?.reversed, true);
+check('restored: counted once, not twice', spent(restored), DELIVERY);
+check('restored: food cost agrees', spentViaFoodCost(restored), DELIVERY);
+
+/* ----------------------------------------------------------- the orphan */
+// The ledger caps at 20,000 lines (ADR-001), and a trim drops the oldest — so
+// a reversal can outlive the row it reverses. This is why the filter reads a
+// flag on both halves instead of matching a negative row against a prior
+// positive one: with nothing left to match, an inferring rule sees a live line.
+console.log('\nAn orphaned reversal');
+const trimmed = [
+  reversalOf(delivery, 'r3', T + 2 * HOUR),
+  stamp(buildMovement(mince, 20, 'added', 'Later'), { id: 'd3', totalCost: 900, timestamp: T + 4 * HOUR }),
+];
+check('the orphan is still excluded', effectiveMovements(trimmed).length, 1);
+check('and the live receipt survives', effectiveMovements(trimmed)[0].id, 'd3');
+check('only the live receipt is spending', spent(trimmed), 900);
+
+/* ------------------------------------------------- levels are unaffected */
+// Convention 6 and ADR-017: effective for economics, every row for levels. A
+// reversal genuinely moved the shelf, and `resulting` records where it left it.
+console.log('\nLevels read every row');
+const levelAt = (ms: StockMovement[], at: number) => ledgerLevelsAt(ms, at).get('s1') ?? null;
+check('after the delivery', levelAt(received, T + 10 * HOUR), 180);
+check('after the undo', levelAt(undoneByLedger, T + 10 * HOUR), 80);
+check('after the restore', levelAt(restored, T + 10 * HOUR), 180);
+check('a full cycle returns to where it was', levelAt(restored, T + 10 * HOUR), levelAt(received, T + 10 * HOUR));
+// And the reason the filter must not be applied here: at 1.5h the shelf really
+// held 180, and a filtered ledger would report the 80 it started from.
+check('the shelf at 1.5h', levelAt(restored, T + 1.5 * HOUR), 180);
+check('what the filter would have said', levelAt(effectiveMovements(restored), T + 1.5 * HOUR), 80);
+
+/* --------------------------------------- a correction is still a correction */
+// The two reasons exist to be told apart. A genuine count is not bookkeeping:
+// it survives the filter and still reaches shrinkage, which is the finding.
+console.log('\nA correction is still a correction');
+const counting = [stamp(
+  buildMovement({ ...mince, quantity: 80 }, -6, 'stocktake', 'Saturday count'),
+  { id: 'sc1', timestamp: T + 4 * HOUR },
+)];
+check('the count is not marked', counting[0].reversed, undefined);
+check('it survives the filter', effectiveMovements(counting).length, 1);
+check('and reaches shrinkage', shrinkageValue(counting, stock, led).variance, 6 * 50);
+// Undone, it is a finding thrown away, and stops being counted as one.
+const countUndone = postMovements(counting, [reversalOf(counting[0], 'r4', T + 5 * HOUR)]);
+check('an undone count is no longer a finding', shrinkageValue(countUndone, stock, led).variance, 0);
+check('and the shelf still remembers it', levelAt(countUndone, T + 4.5 * HOUR), 74);
+
+/* -------------------------------------------------------- an undone void */
+// Voiding sets `voidedAt`; its undo restores the whole order list from before
+// the void, so there is no separate flag to forget. Checked rather than assumed.
+console.log('\nAn undone void');
+const soldTicket = order({ id: 'v1', subtotal: 500, total: 500, items: [line('a', 'A', 1, 500)] });
+const voidedTicket = order({ ...soldTicket, voidedAt: T + HOUR, voidReason: 'Wrong order' });
+check('a void is counted', voidStats([voidedTicket]).voided, 1);
+check('an undone void is not', voidStats([soldTicket]).voided, 0);
+check('and the ticket is live again', voidStats([soldTicket]).live, 1);
+check('leaving void stats where they started', voidStats([soldTicket]).byCountPct, 0);
 
 /* -------------------------------------- food cost — the ledger beats a snapshot */
 // Mince ran 100 → 60 before the window opened. The morning's snapshot still
