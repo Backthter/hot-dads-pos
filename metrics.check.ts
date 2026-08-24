@@ -12,12 +12,16 @@ import {
 } from './src/app/analytics/metrics';
 import { buildMovement, effectiveMovements, postMovements } from './src/app/lib/inventory';
 import {
-  costEntryIsCoherent, costsForEvent, endSession, needsRefiling, pauseSession, resumeSession,
-  sessionTradingHours, startSession,
+  allEvents, costEntryIsCoherent, costsFiledAgainstEvent, costsForEvent, endSession, eventGroups,
+  eventStatus, needsRefiling, pauseSession, resumeSession, sessionTradingHours, startSession,
+  ungroupedSessions,
 } from './src/app/lib/sessions';
 import {
   COST_ENTRY_COLUMNS, costEntryFromRow, costEntryToRow,
 } from './src/db/costEntryRows';
+import {
+  TRADING_EVENT_COLUMNS, tradingEventFromRow, tradingEventToRow,
+} from './src/db/tradingEventRows';
 import { resolveScope, type Scope } from './src/app/analytics/scope';
 import {
   DEFAULT_TAB, TABS, lockFor, migrateTabId, resolveLock, type HistorySource,
@@ -808,6 +812,193 @@ check('dates with an event allow it', datedWith.perEvent.available, true);
 // make ADR-013's held-cost distinction meaningless, because the "event" and the
 // session would then be the same period.
 check('a session id never becomes an event id', loneScope.eventId === lone.id, false);
+
+/* --------------------------------------------- events, and what they are for */
+// Phase 1C-ii-a. `per-event` existed for one cost — the pitch fee for a
+// three-day market, paid once — and that cost could not be logged, because an
+// event could only be made by grouping two sessions that had already traded.
+// The fee is paid on Saturday morning. These are the properties that make it
+// loggable then, and the ones every existing consumer already depends on.
+console.log('\nEvents');
+
+const aSession = (over: Partial<TradingSession> & { id: string }): TradingSession => ({
+  name: over.id, status: 'ended', startedAt: T, endedAt: T + 4 * HOUR,
+  ticketCounter: 0, pausedMs: 0, ...over,
+});
+
+// --- eventStatus, across all three states -----------------------------------
+// Derived from the sessions and never stored, so that resuming one cannot leave
+// a column saying something the rows disagree with.
+const plan: TradingEvent = {
+  id: 'plan', name: 'Winter Market', createdAt: T,
+  plannedStart: T + 48 * HOUR, plannedEnd: T + 96 * HOUR, venue: 'The square',
+};
+check('no sessions is planned', eventStatus(plan, []), 'planned');
+
+const dayA = aSession({ id: 'a', eventId: 'plan', status: 'ended' });
+const dayB = aSession({ id: 'b', eventId: 'plan', status: 'ended', startedAt: T + 24 * HOUR });
+check('all ended is ended', eventStatus(plan, [dayA, dayB]), 'ended');
+check('one active is active',
+  eventStatus(plan, [dayA, { ...dayB, status: 'active', endedAt: undefined }]), 'active');
+// Paused is mid-market, not finished. A market that stops at dusk and picks up
+// in the morning is still running, and calling it ended overnight is the
+// calendar-day mistake invariant 4 exists against.
+check('one paused is active',
+  eventStatus(plan, [dayA, { ...dayB, status: 'paused', endedAt: undefined }]), 'active');
+// The transition that a stored status would get wrong. An event whose only
+// session has ended reads `ended`; resume that session and it reads `active`
+// again, with nothing to migrate and nothing to disagree with.
+const only = aSession({ id: 'only', eventId: 'plan', status: 'ended' });
+check('an event of one, ended', eventStatus(plan, [only]), 'ended');
+const revived = resumeSession(pauseSession(
+  { ...only, status: 'active', endedAt: undefined }, T + 4 * HOUR), T + 8 * HOUR);
+check('and active again once resumed', eventStatus(plan, [revived]), 'active');
+// Sessions belonging to some other event are not this one's business.
+check('another event\'s sessions do not count',
+  eventStatus(plan, [aSession({ id: 'x', eventId: 'other', status: 'active', endedAt: undefined })]),
+  'planned');
+
+// --- an event of one is not a lone session ----------------------------------
+// ADR-020 makes an event of one legitimate, and the consequence is that a real
+// one and an ungrouped session are drawn alike. `grouped` is what tells them
+// apart, and `ResolvedScope.eventId` is what the cost form reads.
+const declared: TradingEvent = { id: 'declared', name: 'Saturday Market', createdAt: T };
+const inside = aSession({ id: 'inside', eventId: 'declared' });
+const alone = aSession({ id: 'alone', startedAt: T + 48 * HOUR, endedAt: T + 52 * HOUR });
+const mixed = eventGroups([declared], [inside, alone]);
+const declaredGroup = mixed.find(g => g.sessions.some(s => s.id === 'inside'));
+const aloneGroup = mixed.find(g => g.sessions.some(s => s.id === 'alone'));
+check('an event of one is grouped', declaredGroup?.grouped, true);
+check('and carries the event id', declaredGroup?.id, 'declared');
+check('a lone session is not grouped', aloneGroup?.grouped, false);
+check('and carries only its own id', aloneGroup?.id, 'alone');
+// Both hold exactly one session, which is the whole reason they look alike.
+check('both are one session', [declaredGroup?.sessions.length, aloneGroup?.sessions.length], [1, 1]);
+// The manager's two lists. An event of one is an event; a lone session is not.
+check('allEvents holds only the event', allEvents([declared], [inside, alone]).length, 1);
+check('and ungroupedSessions holds only the session',
+  ungroupedSessions([declared], [inside, alone]).map(s => s.id), ['alone']);
+// A session pointing at an event that is not there is ungrouped, in both lists
+// and in eventGroups. A dangling id is a broken link, not a hidden session.
+check('a dangling event id reads as ungrouped',
+  ungroupedSessions([], [inside]).map(s => s.id), ['inside']);
+
+// --- eventGroups excludes session-less events; allEvents includes them -------
+// This is the property every existing consumer depends on, asserted out loud.
+// `eventGroups` was excluding them only because auto-delete meant they could
+// not occur; ADR-021 makes them occur, so the exclusion is now explicit.
+// Several consumers index `group.sessions[0]` and `spanOf(group.sessions)`,
+// which are wrong on an empty group rather than merely empty.
+const empty: TradingEvent = { id: 'empty', name: 'Next month', createdAt: T, plannedStart: T + 300 * HOUR };
+check('eventGroups omits a session-less event',
+  eventGroups([declared, empty], [inside]).map(g => g.id), ['declared']);
+check('no group is ever empty',
+  eventGroups([declared, empty], [inside, alone]).every(g => g.sessions.length > 0), true);
+check('allEvents keeps it', allEvents([declared, empty], [inside]).map(l => l.event.id).sort(),
+  ['declared', 'empty']);
+const emptyListing = allEvents([empty], [])[0];
+check('with status planned', emptyListing.status, 'planned');
+// Its span is null rather than the plan. A plan in the column a measurement
+// belongs in is how a plan becomes a record.
+check('and no span, because nothing traded', emptyListing.span, null);
+check('the plan is still readable', emptyListing.event.plannedStart, T + 300 * HOUR);
+
+// --- no auto-delete ---------------------------------------------------------
+// Detaching the last session used to delete the event. It does not now: a
+// planned event with no sessions is exactly what "created Thursday for
+// Saturday" produces, and it is also what correcting a mis-grouping produces
+// one keystroke before the session goes back (ADR-021).
+const detached = { ...inside, eventId: undefined };
+check('the event survives its last session leaving',
+  allEvents([declared], [detached]).map(l => l.event.id), ['declared']);
+check('with no sessions', allEvents([declared], [detached])[0].sessions.length, 0);
+check('and status planned again', eventStatus(declared, [detached]), 'planned');
+check('while dropping out of eventGroups', eventGroups([declared], [detached]).length, 1);
+check('as a lone session, not as the event',
+  eventGroups([declared], [detached])[0].grouped, false);
+// And deleting one that a cost is charged to is refused rather than orphaning
+// the cost. A per-event entry carries the event id and nothing else, so the
+// amount would point at a row that is gone: invisible to costsForEvent, to
+// every event figure, and correct-looking wherever it was typed.
+const pitchFee = cost({ id: 'c-pitch', eventId: 'declared', amount: 3000, basis: 'per-event' });
+check('a cost filed against the event blocks deleting it',
+  costsFiledAgainstEvent([pitchFee], 'declared').length, 1);
+check('a session cost does not', costsFiledAgainstEvent([cost({ sessionId: 'inside' })], 'declared').length, 0);
+
+// --- the four new columns, through persistence -------------------------------
+// The pattern 1A-i used for `cost_entries`, and for the same reason: `eventId`
+// was on the type, had no column, was never written, and every event-level cost
+// was lost on reload while the type went on claiming it was there. Field by
+// field, then whole, so a column added on one side and not the other fails here
+// even when nobody thought to check it by name.
+console.log('\nEvent round trip');
+const planned: TradingEvent = {
+  id: 'evt-plan',
+  name: 'Winter Market',
+  plannedStart: T + 48 * HOUR,
+  plannedEnd: T + 96 * HOUR,
+  venue: 'Market Square',
+  notes: 'Pitch 14, back row',
+  createdAt: T,
+};
+const eventColumns = [...TRADING_EVENT_COLUMNS];
+const eventWritten = tradingEventToRow(planned);
+const eventRead = tradingEventFromRow(
+  Object.fromEntries(eventColumns.map((name, i) => [name, eventWritten[i]])),
+);
+check('planned start survives the round trip', eventRead.plannedStart, T + 48 * HOUR);
+check('planned end survives it', eventRead.plannedEnd, T + 96 * HOUR);
+check('venue survives it', eventRead.venue, 'Market Square');
+check('notes survive it', eventRead.notes, 'Pitch 14, back row');
+check('name survives it', eventRead.name, 'Winter Market');
+check('createdAt survives it', eventRead.createdAt, T);
+check('the whole event is unchanged', sortKeys(eventRead), sortKeys(planned));
+
+// An event made by grouping after the fact has no plan, and must come back with
+// none rather than with zeros. A missing plan is not a plan of the epoch, and a
+// blank venue is not a venue — the same distinction as invariant 2, applied to
+// dates and text.
+const unplanned: TradingEvent = { id: 'evt-bare', name: 'Autumn Fair', createdAt: T };
+const bareRead = tradingEventFromRow(Object.fromEntries(
+  eventColumns.map((name, i) => [name, tradingEventToRow(unplanned)[i]]),
+));
+check('an unplanned event round-trips as unplanned', sortKeys(bareRead), sortKeys(unplanned));
+check('no planned start invented', bareRead.plannedStart, undefined);
+check('no venue invented', bareRead.venue, undefined);
+// A row written by an older build has none of the three columns at all. It has
+// to load, and it has to load as an event with no plan.
+const legacyRead = tradingEventFromRow({ id: 'evt-old', name: 'Old', notes: null, created_at: T });
+check('a pre-migration row still loads', legacyRead.name, 'Old');
+// Asserted as a boolean rather than as an array of undefineds: `check` compares
+// through JSON, where undefined and null both serialise to null, so the array
+// form would pass on a row that came back holding literal nulls.
+check('and carries no plan',
+  [legacyRead.plannedStart, legacyRead.plannedEnd, legacyRead.venue]
+    .every(v => v === undefined),
+  true);
+// Zero is what a column filled by a default would hold, and it is not a plan.
+check('a stored zero is not a date',
+  tradingEventFromRow({ id: 'z', name: 'Z', planned_start: 0, created_at: T }).plannedStart,
+  undefined);
+// There is no status column, and there must not be one: it would be a second
+// source of truth about a fact the sessions already hold, and the two would
+// disagree the first time somebody resumed a session inside an ended event.
+check('status is not stored', eventColumns.includes('status' as never), false);
+
+// --- starting a session into an event ---------------------------------------
+// Optional, and undefined by default. Most days are just days.
+console.log('\nStarting into an event');
+check('no event by default', startSession([], T, 'Tuesday').eventId, undefined);
+check('and the field is absent, not null',
+  Object.prototype.hasOwnProperty.call(startSession([], T, 'Tuesday'), 'eventId'), false);
+const started = startSession([], T, 'Day one', 'declared');
+check('an event when one is named', started.eventId, 'declared');
+// Which means it is in the event from its first order, rather than after the
+// market is over and somebody remembers to group it.
+check('and it is the event\'s from the start',
+  eventStatus(declared, [started]), 'active');
+check('reported as the event, not as itself',
+  eventGroups([declared], [started])[0].id, 'declared');
 
 /* ----------------------------------------------------------- the tab set */
 // ADR-019 and the 1C-i tab migration. Both are pure so that they can be held to
