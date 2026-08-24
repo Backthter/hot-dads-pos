@@ -73,6 +73,11 @@ export function BoardScreen({ orders, sessions, grillCapacity, onOtherBoard }: B
             onRename={sessions.actions.rename}
             onGroup={sessions.actions.group}
             onUngroup={sessions.actions.ungroup}
+            onMoveSession={sessions.actions.moveSessionToEvent}
+            onMakeEvent={sessions.actions.makeSessionAnEvent}
+            onCreateEvent={sessions.actions.addEvent}
+            onEditEvent={sessions.actions.editEvent}
+            onDeleteEvent={sessions.actions.deleteEvent}
           />
           <Section title="PREPARING" status="preparing" orders={numbered(orders.state.preparing)} editingOrderIds={orders.state.editingOrderIds} grillIsFull={grillIsFull} onEditOrder={orders.actions.startEditingOrder} showDelete={true} pendingDeleteId={orders.state.pendingDeleteId} onDelete={orders.actions.voidOrder} showTimestamp={true} />
           <Section title="ON THE GRILL" status="grill" orders={numbered(orders.state.grill)} capacity={grillCapacity} editingOrderIds={orders.state.editingOrderIds} grillIsFull={grillIsFull} onEditOrder={orders.actions.startEditingOrder} showDelete={true} pendingDeleteId={orders.state.pendingDeleteId} onDelete={orders.actions.voidOrder} showTimestamp={true} />
