@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { Check, Minus, Plus, Undo2, X } from 'lucide-react';
+import { Check, Eye, EyeOff, Minus, Plus, Undo2, X } from 'lucide-react';
 import { StockIcon } from './icons';
 import { ACCENT, GOOD, ON_ACCENT, PrimaryButton, GhostButton, QuantityDisplay } from './InventoryUI';
 import {
@@ -33,6 +33,7 @@ export function QuickAddPanel({
   const [unit, setUnit] = useState(item.unit);
   const [packets, setPackets] = useState(1);
   const [cost, setCost] = useState('');
+  const [showUndone, setShowUndone] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -41,6 +42,9 @@ export function QuickAddPanel({
     setPackets(1);
     setCost('');
     setUnit(item.unit);
+    // The toggle is about the item being looked at, not a preference. Switching
+    // items should not silently carry a widened history across.
+    setShowUndone(false);
   }, [item.id, hasPacket, item.unit]);
 
   useEffect(() => {
@@ -59,14 +63,50 @@ export function QuickAddPanel({
   const canAdd = delta > 0;
   const after = item.quantity + delta;
 
-  const recent = useMemo(
-    () => movements
+  /**
+   * What the ledger says, read as what happened.
+   *
+   * The ledger being append-only is right, and showing add / remove / add as
+   * three equal events is what made it read as confusing — a delivery that was
+   * received, undone and put back looks like three deliveries. So a reversed
+   * pair is hidden by default and the toggle brings it back.
+   *
+   * When shown, the pair is placed adjacent. Time order alone does not do it:
+   * the reversal is later than the row it cancels and anything can have
+   * happened in between, which leaves the reader inferring the pairing from
+   * two matching numbers some distance apart. `referenceId` already says it.
+   */
+  const { recent, live, undoneCount } = useMemo(() => {
+    const mine = movements
       .filter(m => m.stockItemId === item.id)
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, 4),
-    [movements, item.id],
-  );
-  const undoable = recent.find(m => m.reason === 'added' || m.reason === 'packet');
+      .sort((a, b) => b.timestamp - a.timestamp);
+    const standing = mine.filter(m => !m.reversed);
+    const hidden = mine.length - standing.length;
+
+    if (!showUndone) return { recent: standing.slice(0, 4), live: standing, undoneCount: hidden };
+
+    const byId = new Map(mine.map(m => [m.id, m]));
+    const placed = new Set<string>();
+    const ordered: StockMovement[] = [];
+    for (const m of mine) {
+      if (placed.has(m.id)) continue;
+      ordered.push(m);
+      placed.add(m.id);
+      if (m.reason === 'reversal' && m.referenceType === 'movement' && m.referenceId) {
+        const original = byId.get(m.referenceId);
+        if (original && !placed.has(original.id)) {
+          ordered.push(original);
+          placed.add(original.id);
+        }
+      }
+    }
+    // Room for four events, where a shown pair is two lines of one event.
+    return { recent: ordered.slice(0, 8), live: standing, undoneCount: hidden };
+  }, [movements, item.id, showUndone]);
+
+  // Only a line that still stands can be undone. Offering it on a reversed row
+  // would post a reversal of a reversal, which is not what the button says.
+  const undoable = live.slice(0, 4).find(m => m.reason === 'added' || m.reason === 'packet');
 
   /**
    * Receiving packets already implies what the lot cost, so the field is filled
@@ -292,15 +332,29 @@ export function QuickAddPanel({
           <span className="text-[var(--app-text-muted)] text-[11px] uppercase tracking-[0.6px] font-semibold">
             Recent activity
           </span>
-          {undoable && (
-            <GhostButton
-              onClick={() => onUndo(undoable.id)}
-              className="!h-[30px] !px-[10px] !text-[11px]"
-              title="Put the shelf back the way it was before this was added"
-            >
-              <Undo2 size={12} /> Undo last
-            </GhostButton>
-          )}
+          <div className="flex items-center gap-[6px]">
+            {undoneCount > 0 && (
+              <GhostButton
+                onClick={() => setShowUndone(v => !v)}
+                className="!h-[30px] !px-[10px] !text-[11px]"
+                title={showUndone
+                  ? 'Hide changes that were undone, and the lines that cancelled them'
+                  : 'Show changes that were undone, next to the lines that cancelled them'}
+              >
+                {showUndone ? <EyeOff size={12} /> : <Eye size={12} />}
+                {showUndone ? 'Hide undone' : `Show undone (${undoneCount})`}
+              </GhostButton>
+            )}
+            {undoable && (
+              <GhostButton
+                onClick={() => onUndo(undoable.id)}
+                className="!h-[30px] !px-[10px] !text-[11px]"
+                title="Put the shelf back the way it was before this was added"
+              >
+                <Undo2 size={12} /> Undo last
+              </GhostButton>
+            )}
+          </div>
         </div>
         {recent.length === 0 ? (
           <p className="text-[var(--app-text-muted)] text-[12px]">Nothing recorded yet.</p>
@@ -315,10 +369,16 @@ export function QuickAddPanel({
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, height: 0 }}
                   className="flex items-center gap-[8px] text-[12px]"
+                  // A cancelled line is shown as cancelled: struck through and
+                  // dimmed, so the pair reads as one event that did not stand
+                  // rather than as two more things that happened.
+                  style={m.reversed
+                    ? { opacity: 0.45, textDecoration: 'line-through' }
+                    : undefined}
                 >
                   <span
                     className="font-bold tabular-nums w-[74px] shrink-0"
-                    style={{ color: m.delta >= 0 ? GOOD : '#F9624E' }}
+                    style={{ color: m.reversed ? 'var(--app-text-muted)' : (m.delta >= 0 ? GOOD : '#F9624E') }}
                   >
                     {m.delta >= 0 ? '+' : '−'}{formatQuantityLabel(Math.abs(m.delta), item.unit)}
                   </span>

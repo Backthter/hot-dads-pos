@@ -727,6 +727,18 @@ export function useOrders(core: StateCore, deps: OrdersDeps) {
        * again — and the numbering, which was closed up when the ticket left the
        * board, has to open back out. All three move together or none of them
        * mean anything.
+       *
+       * That is also what keeps `voidStats` honest, and it was checked rather
+       * than assumed in Phase 1B. The undo restores the whole order list from
+       * before the void, so `voidedAt` and `voidReason` go with it and the
+       * ticket counts as live again — there is no separate flag to forget.
+       * `metrics.check.ts` asserts it.
+       *
+       * The stock side needs no `reversal` line. Returning a voided order's
+       * ingredients and taking them back off are both real physical movements
+       * with reasons of their own (`returned`, `sold`), not the program undoing
+       * its own bookkeeping. Marking them `reversed` would hide a sale that
+       * genuinely happened from consumption and food cost.
        */
       history.record({
         label: `Voided order #${target.orderNumber}`,
