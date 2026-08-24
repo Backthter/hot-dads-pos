@@ -31,6 +31,19 @@ import type { CostBasis, CostEntry, Order, TradingEvent, TradingSession } from '
 /** Which completed orders the board shows while a session is running. */
 export type CompletedFilter = 'all' | 'session';
 
+/**
+ * The event a session is started into, if any.
+ *
+ * **Undefined is the default and the common case.** Most days are just days,
+ * and a picker that demands an answer every morning is a picker that gets
+ * dismissed every morning — after which the session carries whatever dismissing
+ * it happened to mean. Naming an event is the exception, and the exception is
+ * the one worth typing.
+ */
+export type StartTarget =
+  | { kind: 'existing'; eventId: string }
+  | { kind: 'new'; name: string; details?: EventDetails };
+
 export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoable) {
   const { snapshot } = core;
   const history = useHistory();
@@ -55,11 +68,20 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
    * ticket number, so any live session is paused first rather than refused —
    * the till should never be blocked by a session someone forgot to close.
    */
-  const start = useCallback((name: string) => {
+  const start = useCallback((name: string, into?: StartTarget) => {
     const now = Date.now();
+    // An event named rather than picked is created here, in the same tick, so
+    // the session is attached to a real row from the moment it exists rather
+    // than to an id nothing is behind. A person typed the name — this is not
+    // the program inventing one (ADR-018, ADR-020).
+    const created = into?.kind === 'new'
+      ? createEvent(into.name, now, into.details)
+      : null;
+    if (created) setTradingEvents(prev => [...prev, created]);
+    const eventId = created?.id ?? (into?.kind === 'existing' ? into.eventId : undefined);
     setTradingSessions(prev => {
       const parkedFirst = prev.map(s => (s.status === 'active' ? pauseSession(s, now) : s));
-      return [...parkedFirst, startSession(prev, now, name)];
+      return [...parkedFirst, startSession(prev, now, name, eventId)];
     });
     setCompletedFilter('session');
     explainNotUndoable(
@@ -237,6 +259,45 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
   }, [snapshot, history]);
 
   /**
+   * Moves a session into an event that already exists, or out of one.
+   *
+   * This is the operation the model was missing, and its absence is what made
+   * `per-event` unusable at the time anyone would want it. `group` always
+   * creates a new event, so day three of a market could not be added to the
+   * group made on day two without ungrouping every day and grouping them all
+   * again — during the market, on a phone, between customers.
+   *
+   * `eventId` of `undefined` takes the session out of whatever event it is in,
+   * which is the same effect as `ungroup` and is here so the manager's "move
+   * into…" control has a "none" entry rather than a second control beside it.
+   *
+   * Undoable, recorded here at the mutation site (convention 3) with
+   * `restoreAction`, because only one array changes: the events are untouched
+   * either way. Nothing is deleted when the session that leaves was the last
+   * one — see `ungroup` and ADR-021.
+   */
+  const moveSessionToEvent = useCallback((sessionId: string, eventId?: string) => {
+    const before = snapshot.current.tradingSessions;
+    const target = before.find(s => s.id === sessionId);
+    if (!target) return;
+    if ((target.eventId ?? undefined) === eventId) return;
+    // A move into an event that is not there would leave the session looking
+    // ungrouped to `eventGroups` and grouped to everything reading the field.
+    if (eventId && !snapshot.current.tradingEvents.some(e => e.id === eventId)) return;
+    const destination = eventId
+      ? snapshot.current.tradingEvents.find(e => e.id === eventId)
+      : undefined;
+    const next = before.map(s => (s.id === sessionId ? { ...s, eventId } : s));
+    setTradingSessions(next);
+    history.record(restoreAction(
+      destination
+        ? `Moved ${target.name} into ${destination.name}`
+        : `Took ${target.name} out of its event`,
+      'session', before, next, setTradingSessions,
+    ));
+  }, [snapshot, history]);
+
+  /**
    * Detaches a session from its event, and drops the event once it is empty.
    *
    * An event with no sessions is not a fact about the business, only a leftover
@@ -396,6 +457,7 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
       end,
       rename,
       group,
+      moveSessionToEvent,
       makeSessionAnEvent,
       addEvent,
       editEvent,
