@@ -339,3 +339,48 @@ the only substantial piece, and it is a client for one protocol.
 
 Nothing in Rust knows about the domain. It moves rows and bytes; every rule in
 this document is enforced in TypeScript.
+
+---
+
+## The `docs/` tree
+
+```
+docs/
+  ROADMAP.md            the index — where the project is, one line per phase
+  OPEN.md               the carry-forward register of everything left unfixed
+  PLANNING-BRIEF.md     what this project is, and how to write a prompt for it
+  00-ARCHITECTURE.md    this file — the shape of the program
+  01-DOMAIN.md          what the words mean
+  02-DECISIONS.md       ADRs, numbered, with what was rejected and why
+  03-INVARIANTS.md      rules that corrupt data silently when broken
+  phases/               what each phase actually did, one file per phase
+    TEMPLATE.md         the shape every phase document takes
+  plan/                 the long-range plans — historical, superseded in places
+    README.md           what the plans are, and their known divergences
+```
+
+**Two of these change every phase; the rest do not.**
+
+`ROADMAP.md` and `OPEN.md` are **living documents**, updated by every phase as
+part of that phase's work. A phase that closes a finding removes it from the
+register and says so in its report; a phase that leaves one adds it. If the
+register gets shorter and no report says why, something was lost rather than
+fixed.
+
+`02-DECISIONS.md` and everything under `phases/` are **append-only**. An ADR is
+never edited once written, because the record of what was decided — including
+what was rejected, and on what evidence — is the thing that stops a later
+session re-deciding it from scratch. A decision that turns out wrong gets a
+**new** ADR that supersedes the old one by number; the old text stays. Phase
+documents are the same: they describe what was true when the phase ended, and
+correcting one retroactively destroys the evidence of how the project actually
+went.
+
+`plan/` is historical and is not edited either. Where a plan and a phase document
+disagree, **the phase document wins** — the plan is what was intended, the phase
+document is what was built by a session that read the code. The disagreement is
+recorded in `plan/README.md` rather than by rewriting the plan.
+
+The practical consequence: if you find something in a phase document that is no
+longer true, the fix is a line in `OPEN.md` or the next phase document, never an
+edit to the old one.
