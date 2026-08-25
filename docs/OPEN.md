@@ -16,21 +16,26 @@ Ordered by what happens if nobody fixes it.
 
 ---
 
-> **Verified against the tree at `d969b9b`** by the docs-scaffold session. The
-> register was seeded by the planner from phase reports rather than from the
-> code. Every entry below has since been checked against the file it names; six
-> entries were added from phase documents that had never reached the register,
-> one entry's stated consequence was wrong, and two rows of the Closed table
-> were attributed to the wrong phase. What changed is in that session's report.
+> **Verified against the tree at `d969b9b`** by the docs-scaffold session, and
+> maintained since. The register was seeded by the planner from phase reports
+> rather than from the code; every entry was checked against the file it names,
+> six were added from phase documents that had never reached the register, one
+> entry's stated consequence was wrong, and two rows of the Closed table were
+> attributed to the wrong phase.
+>
+> **Line numbers are as at the phase that last touched the entry.** They are
+> given because "somewhere in `useStock.ts`" costs the next reader ten minutes,
+> not because they are guaranteed current — check the name, not the number.
 
 ---
 
-## The export menu is outside the revenue lock
+## The whole nav slot is outside the revenue lock, and the export menu is in it
 
 **Found:** 1C-i · **Take it:** Phase 6, first thing
 **Where:** `src/app/analytics/ExportMenu.tsx`, `src/app/analytics/workbook.ts`;
 mounted at `AnalyticsView.tsx:403` inside `NavActions`. The `lock.hidden` branch
-begins at `AnalyticsView.tsx:441`, after the nav slot has closed.
+begins at `AnalyticsView.tsx:441`, after the nav slot has closed — so **nothing
+rendered in that slot is locked**, not just the export.
 
 **What happens if it is not fixed:** a user with no revenue PIN presses Export
 and receives a workbook containing every figure the lock hides. The lock becomes
@@ -39,6 +44,14 @@ decoration.
 **Why it was deferred:** 1C-i was structural and the export belongs to Phase 6.
 ADR-019 made the lock per-tab; the export sits outside the tab system entirely,
 so it inherited nothing.
+
+**The wider form of it, found in 1C-ii-b:** the gap is the slot, not the button.
+`ScopePicker` lives there too, and the obvious way to draw a hierarchical scope
+list is with each session's takings beside it — which would put revenue in front
+of a user with no PIN without anybody noticing they had done it. 1C-ii-b left
+money out of that list for this reason and said so in the component. Whoever
+closes this should close it at the slot, so the next control added there
+inherits the lock instead of having to remember it.
 
 **Urgent when:** anyone but the owner uses the program. This is a **V2 blocker** —
 the whole point of roles is that a cashier cannot see margins, and an export
@@ -228,58 +241,53 @@ dead migration would be a real bug.
 
 ---
 
-## `HINT.costFixed` and `HINT.costVariable` describe the pre-ADR-012 model
 
-**Found:** 1C-i · **Take it:** whichever phase next edits the cost form
-**Where:** `src/app/ui/hints.ts:90` and `:91`. Neither is referenced anywhere in
-`src/`.
 
-**What happens if it is not fixed:** nothing renders them, so no wrong figure and
-no wrong words reach a user. `costVariable` still says "a cost that rises with
-every sale", which is exactly the `variable` that ADR-012 removed for not saying
-what it varied with. The risk is that someone reconnects a hint contradicting the
-model the program now uses.
 
-**Why it was deferred:** deleting hints was not 1C-i's business, and a hint
-nothing renders is not a wrong figure. `plan/PHASE-1C.md` asked 1C-ii to delete
-them; 1C-ii-a did not, and did not say why.
+## The exported workbook's break-even ignores per-unit targeting
 
-**Urgent when:** anything renders them.
+**Found:** 1C-ii-b · **Take it:** Phase 6, with the export
+**Where:** `src/app/analytics/workbook.ts:286` — `breakEven(totals, costs)`,
+with no sales mix.
 
----
+**What happens if it is not fixed:** for a shop that targets a `per-unit` cost
+at some items (ADR-022), the break-even in the exported workbook is **higher**
+than the one on screen. `resolveCosts` charges a targeted cost in full when it
+is given no mix, which is the deliberate pessimistic fallback — so the export is
+conservative rather than flattering, and no figure in it is invented. But two
+numbers with the same name disagree across two surfaces, which is the shape of
+problem ADR-014 was written about.
 
-## The break-even KPI definition still says "per-sale costs"
+**Why it was deferred:** the fix is three lines — `workbook.ts` already computes
+`items` at `:281` and would need the category list threading in — but the export
+is Phase 6's, it is the same file that has to grow the revenue lock, and doing
+one without the other means opening it twice.
 
-**Found:** 1A-ii · **Take it:** whichever pass rewrites the Business tab's copy
-**Where:** `src/app/analytics/tabs/BusinessTab.tsx:131`.
-
-**What happens if it is not fixed:** the sentence is accurate but no longer says
-*which* sale costs, now that ADR-012 gives three bases with three different
-denominators. 1C-i edited this same string to point at Finance rather than the
-removed Costs tab, and left the "per-sale costs" wording as it was.
-
-**Why it was deferred:** cosmetic, and it belongs with a copy pass rather than as
-a stray edit.
-
-**Urgent when:** never, on its own. Fold it into the next copy pass.
+**Urgent when:** anyone targets a per-unit cost and then reconciles the export
+against the screen. Not before: with nothing targeted the two are identical.
 
 ---
 
-## A per-event cost on an event of one reads oddly, and correctly
+## A `per-unit` cost can only be pointed at one item at a time
 
-**Found:** 1C-ii-a · **Take it:** 1C-ii-b — a copy decision, not a code one
+**Found:** 1C-ii-b · **Take it:** whichever phase next touches the cost form
+**Where:** `src/app/analytics/CostsPanel.tsx` — the `Charged on` select. The
+type and the resolver both take a list: `CostAppliesTo` is
+`{ kind: 'items'; ids: string[] }` and `resolveCosts` walks every id.
 
-**What this is:** from a single session's scope, a pitch fee filed against that
-session's own event is held back and reported as the event's, per ADR-013. For
-an event of one the two scopes cover the same trading, so the figure looks as
-though it is hiding money from itself.
+**What happens if it is not fixed:** a cost that genuinely rides on three items
+has to be logged as three costs, or as a category that also catches things it
+does not ride on. Neither is wrong in the figures — three entries of Rs 12 each
+targeted at one item resolve exactly as one entry targeting three — but the
+ledger reads as three purchases of the same thing.
 
-**Why it is not being worked around:** special-casing single-session events in
-`breakEven` would make a figure behave differently depending on how many days a
-market ran, which is worse than one that is consistently a little pedantic. The
-model is right; what 1C-ii-b owes is the sentence on screen that explains it.
+**Why it was deferred:** the storage and the arithmetic are the part that is
+hard to change later, and both handle the list already; a multi-select is a
+control, and the control is cheap to add once somebody knows whether the shop
+wants one. Building the picker first and finding the shape wrong is the more
+expensive order.
 
-**Urgent when:** 1C-ii-b draws that panel.
+**Urgent when:** the shop asks for it. There is no correctness pressure here.
 
 ---
 
@@ -314,3 +322,7 @@ Kept so that a later reading knows the register got shorter on purpose.
 | The cost basis picker kept a stale session target across a switch to `per-event` | **1A-ii** | **1A-ii**, commit `4fd29c2` — the clear is in the basis button's `onClick` at `CostsPanel.tsx:239`. A later review re-reported this as a fresh finding; it had been fixed for four phases. See `BUG-FIXES.md` §2 |
 | `editEvent` overwrote unsent details with empty — silent loss of notes | 1C-ii-a | the **review pass after** 1C-ii-a's phase document, commit `8dede70`. Not "the same session": `8dede70` lands after `2151f8b`, and 1C-ii-a's phase document does not mention it |
 | `metrics.check.ts` fixtures built date labels from UTC against local-day logic | review | review, commit `8b3dbfd` — present since the baseline, genuinely found by the review |
+| `HINT.costFixed` / `HINT.costVariable` described the pre-ADR-012 model | 1C-i | 1C-ii-b — deleted, with a note in their place saying where per-basis wording now lives |
+| The break-even KPI definition said "per-sale costs", a category ADR-012 removed | 1A-ii | 1C-ii-b — it now names the three scaling bases. A fourth instance of the phrase, in a doc comment on `ItemBreakEven`, went with it |
+| A per-event cost on an event of one read as though the figure were hiding money from itself | 1C-ii-a | 1C-ii-b, **ADR-023** — in the panel's words, not in `breakEven`. Three checks pin the arithmetic so a later session cannot fix the pedantry in the engine |
+| The basis-switch guard was one line in an `onClick` that nothing checked | review (mis-reported as open) | 1C-ii-b — extracted as `targetAfterBasisChange` in `lib/sessions.ts`, twelve checks, **before** the component was rewritten. The defect itself closed in 1A-ii by `4fd29c2`; see the correction note at the end of `BUG-FIXES.md` |

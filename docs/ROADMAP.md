@@ -1,10 +1,11 @@
 # Where this is
 
-**Now:** Phase 1C-ii-b — scope, costs, targeting
+**Now:** Phase 1C-iii — money
 **Default branch:** `master`
-**Checks:** 255 in `metrics.check.ts`, all passing — verified at `d969b9b`,
-after the review fixes. `npm run typecheck` is clean.
-**Next ADR:** 022 — confirmed against `02-DECISIONS.md`, which ends at ADR-021
+**Checks:** 334 in `metrics.check.ts`, all passing — verified at the end of
+1C-ii-b. `pnpm typecheck` is clean. **This repository uses pnpm**; `npm i`
+writes a `package-lock.json` and flattens the layout.
+**Next ADR:** 024 — `02-DECISIONS.md` ends at ADR-023
 
 This page is an index of plans, not a plan. One line per phase. If it takes ten
 minutes to read, it has stopped doing its job.
@@ -22,12 +23,12 @@ Updated by every phase, as part of that phase's work.
 | **1B** | A reversal is its own movement reason, marked on both rows centrally; `effectiveMovements` for economics, every row for levels; redo restores the original's meaning | 016–017 |
 | **1C-i** | Four tabs — Finance, Inventory, Business, History; the revenue lock is per-tab and can hide columns; the costs explainer; `per-event` availability is a resolved fact | 018–019 |
 | **1C-ii-a** | Events carry a plan and a derived status; sessions can join and leave an existing event; an event of one is legitimate when a person declares it; events are never auto-deleted; the Sessions & Events manager | 020–021 |
+| **1C-ii-b** | Both pickers show what an event contains; the cost form names its target in words and offers to make an event of a lone session; `per-unit` costs target items or a category; `resolveCosts` returns a blended rate beside a per-item one | 022–023 |
 
 ## Next
 
 | | | |
 |---|---|---|
-| **1C-ii-b** | Scope, costs, targeting | hierarchical scope picker; the cost form names its target; `per-unit` costs target items; `resolveCosts` returns blended and per-item |
 | **1C-iii** | Money | the Finance table; `breakEvenCrossing`; History · Money, the money ledger |
 | **1C-iv** | Things | the Inventory and Business tables; History · Stock |
 | **1E** | Forecasting | session pace curves and within-day projection; prep forecasting from demand quantiles |
