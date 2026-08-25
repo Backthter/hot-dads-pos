@@ -24,13 +24,13 @@ import {
   attachmentPairs, breakEven, breakEvenByItem, bucketsFor, categoryPerformance, costSummary,
   dataQuality, itemMargins, stockPurchasesValue,
   deadStock, eventPerformance, foodCost, grainFor, inventoryTurnover, inventoryValue,
-  itemPerformance, popularityTrend, queueBands, sessionPerformance, shrinkageValue,
+  itemPerformance, popularityTrend, queueBands, salesMix, sessionPerformance, shrinkageValue,
   stockoutStats, throughput, totalsFor, tradingHours, voidStats,
 } from './metrics';
 import { eventGroups } from '../lib/sessions';
 import type { CostScope, DateRange } from './metrics';
 import type {
-  CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
+  Category, CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
   OversellEvent, StockItem, StockMovement, TradingEvent, TradingSession,
 } from '../types';
 
@@ -63,6 +63,13 @@ const TAB_ICON: Record<TabId, typeof Coins> = {
 export interface AnalyticsViewProps {
   orders: Order[];
   menuItems: MenuItem[];
+  /**
+   * The menu's categories, for resolving a targeted `per-unit` cost.
+   *
+   * A cost stores a category by id and `MenuItem.category` holds a name, so the
+   * two are joined through this list — see `salesMix` (ADR-022).
+   */
+  menuCategories: Category[];
   stockItems: StockItem[];
   assignments: MenuItemStockAssignment[];
   movements: StockMovement[];
@@ -147,7 +154,7 @@ function useStableRange(next: DateRange): DateRange {
  */
 export function AnalyticsView(props: AnalyticsViewProps) {
   const {
-    orders, menuItems, stockItems, assignments, movements, snapshots, oversells,
+    orders, menuItems, menuCategories, stockItems, assignments, movements, snapshots, oversells,
     sessions, events, costs, revenueLocked, onUnlockRevenue,
   } = props;
 
@@ -229,6 +236,16 @@ export function AnalyticsView(props: AnalyticsViewProps) {
   const items = useMemo(
     () => itemPerformance(scopedOrders, menuItems, range), [scopedOrders, menuItems, range]);
   const categories = useMemo(() => categoryPerformance(items), [items]);
+  /**
+   * What sold, per item, with each item's current category.
+   *
+   * Built once and handed to both `breakEven` and `itemMargins` so the headline
+   * rate and the per-item ones are spread from the same mix. Two sites deriving
+   * it separately is how the blended figure and the per-item column would come
+   * to disagree about the same box (ADR-022).
+   */
+  const mix = useMemo(
+    () => salesMix(items, menuItems, menuCategories), [items, menuItems, menuCategories]);
   const buckets = useMemo(
     () => bucketsFor(scopedOrders, range, grainFor(range)), [scopedOrders, range]);
   const hours = useMemo(() => tradingHours(scopedOrders, range), [scopedOrders, range]);
@@ -323,7 +340,7 @@ export function AnalyticsView(props: AnalyticsViewProps) {
   }, [resolved.scope, groups]);
 
   const be = useMemo(
-    () => breakEven(current, scopedCosts, costScope), [current, scopedCosts, costScope]);
+    () => breakEven(current, scopedCosts, costScope, mix), [current, scopedCosts, costScope, mix]);
   /**
    * Margin today and realised margin, per item.
    *
@@ -333,8 +350,8 @@ export function AnalyticsView(props: AnalyticsViewProps) {
    * figure that has to respond the moment any of the three is edited.
    */
   const margins = useMemo(
-    () => itemMargins(items, menuItems, assignments, stockItems, scopedCosts, current, costScope),
-    [items, menuItems, assignments, stockItems, scopedCosts, current, costScope]);
+    () => itemMargins(items, menuItems, assignments, stockItems, scopedCosts, current, costScope, mix),
+    [items, menuItems, assignments, stockItems, scopedCosts, current, costScope, mix]);
   const beByItem = useMemo(
     () => breakEvenByItem(margins, scopedCosts, current, costScope),
     [margins, scopedCosts, current, costScope]);

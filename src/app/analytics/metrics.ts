@@ -1,8 +1,8 @@
 import { effectiveMovements, resolveDealComponent, unitCostFor } from '../lib/inventory';
 import { sessionTradingHours } from '../lib/sessions';
 import type {
-  CartItem, CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
-  OversellEvent, StockItem, StockMovement, TradingSession,
+  CartItem, Category, CostAppliesTo, CostBasis, CostEntry, InventorySnapshot, MenuItem,
+  MenuItemStockAssignment, Order, OversellEvent, StockItem, StockMovement, TradingSession,
 } from '../types';
 
 /**
@@ -602,15 +602,23 @@ export function itemMargins(
   costs: CostSummary,
   totals: Totals,
   scope: CostScope = 'range',
+  mix: SalesMixEntry[] | null = null,
 ): ItemMargin[] {
-  const resolved = resolveCosts(costs, totals, scope);
+  const resolved = resolveCosts(costs, totals, scope, mix);
   // A per-ticket cost becomes a per-unit one through the basket, exactly as in
   // `breakEven`. Both sides carry it, so it cannot create a divergence.
   const perOrderPerUnit = resolved.averageBasket && resolved.averageBasket > 0
     ? resolved.perOrderCost / resolved.averageBasket
     : 0;
 
-  const side = (price: number, unitCost: number): ItemMarginSide => {
+  /*
+   * `perUnitRate` is this item's own, not the shop's blend (ADR-022): a burger
+   * carries its box and a drink does not. Both sides of the margin are given
+   * the same rate for the same reason `perOrderPerUnit` is — a cost that
+   * appeared on one side only would read as a divergence between today's margin
+   * and the realised one, when nothing about the item had changed.
+   */
+  const side = (price: number, unitCost: number, perUnitRate: number): ItemMarginSide => {
     const grossPerUnit = price - unitCost;
     return {
       price,
@@ -618,7 +626,7 @@ export function itemMargins(
       grossPerUnit,
       marginPct: price > 0 ? (grossPerUnit / price) * 100 : 0,
       contributionPerUnit: grossPerUnit
-        - price * resolved.revenueRate - resolved.perUnitCost - perOrderPerUnit,
+        - price * resolved.revenueRate - perUnitRate - perOrderPerUnit,
     };
   };
 
@@ -627,13 +635,18 @@ export function itemMargins(
     const live = menuItem
       ? unitCostFor(menuItem, menuItems, assignments, stockItems)
       : null;
+    const perUnitRate = resolved.perUnitCostFor(item.menuItemId);
 
+    // A cost you can resolve does not make an ingredient cost you cannot: a
+    // targeted cost lands on this item, and the recipe is still incomplete, so
+    // the margin is still null rather than taken from a partial cost
+    // (invariant 2).
     const today = menuItem && live?.complete && menuItem.price > 0
-      ? side(menuItem.price, live.cost)
+      ? side(menuItem.price, live.cost, perUnitRate)
       : null;
 
     const realised = item.costed && item.units > 0 && item.netRevenue > 0
-      ? side(item.netRevenue / item.units, item.cogs / item.units)
+      ? side(item.netRevenue / item.units, item.cogs / item.units, perUnitRate)
       : null;
 
     const divergencePct = today && realised && realised.grossPerUnit !== 0
@@ -940,6 +953,19 @@ export interface CostSummary {
    */
   total: number;
   entries: number;
+  /**
+   * The `per-unit` entries that name what they are charged against, kept apart
+   * from the total so `resolveCosts` can spread each one over its own items.
+   *
+   * A summary carrying entry-level detail looks like a leak, and it is the
+   * smaller of two evils: the alternative is a second path from entries to
+   * money, and 1A-ii made `resolveCosts` the single place a `CostSummary` plus
+   * a period's `Totals` becomes rupees precisely so the headline figure and the
+   * per-item one cannot drift apart on how a rate is spread. Only the targeted
+   * ones are here — an untargeted per-unit cost is fully described by
+   * `byBasis['per-unit']` and needs no spreading.
+   */
+  perUnitTargets: { amount: number; appliesTo: CostAppliesTo }[];
 }
 
 const ZERO_BY_BASIS = (): Record<CostBasis, number> => ({
@@ -955,9 +981,18 @@ const ZERO_BY_BASIS = (): Record<CostBasis, number> => ({
  */
 export function costSummary(costs: CostEntry[]): CostSummary {
   const byBasis = ZERO_BY_BASIS();
-  for (const c of costs) byBasis[c.basis] += c.amount;
+  const perUnitTargets: { amount: number; appliesTo: CostAppliesTo }[] = [];
+  for (const c of costs) {
+    byBasis[c.basis] += c.amount;
+    // A target only means anything on per-unit; `assertCostEntry` refuses it
+    // elsewhere and the load path drops it, so reading the basis here is belt
+    // and braces rather than a second rule (ADR-022).
+    if (c.basis === 'per-unit' && c.appliesTo) {
+      perUnitTargets.push({ amount: c.amount, appliesTo: c.appliesTo });
+    }
+  }
   const total = byBasis['per-session'] + byBasis['per-event'];
-  return { byBasis, total, entries: costs.length };
+  return { byBasis, total, entries: costs.length, perUnitTargets };
 }
 
 /* ------------------------------------------------- resolving a cost to money */
@@ -992,8 +1027,38 @@ export interface ResolvedCosts {
    * every other scope, where the event's costs are simply part of `fixed`.
    */
   heldEventCosts: number;
-  /** Rupees charged on every item sold, from `per-unit`. Ingredients are separate. */
+  /**
+   * Rupees charged on every item sold, from `per-unit`, **blended** across the
+   * period's sales mix. Ingredients are separate.
+   *
+   * This is the shop-level figure and the one `breakEven` divides by. A cost
+   * that names particular items (ADR-022) contributes only the share of units
+   * it actually reaches — a Rs 12 box on an item that is half of what sold adds
+   * Rs 6 here — because the headline is about the average sale, and the average
+   * sale is half a box.
+   *
+   * With nothing targeted this is exactly `byBasis['per-unit']`, unchanged from
+   * before ADR-022. Per item, use `perUnitCostFor`.
+   */
   perUnitCost: number;
+  /**
+   * The part of `perUnitCost` that every item carries regardless of target.
+   *
+   * Exposed because it is the floor `perUnitCostFor` builds on, and because a
+   * blend is much easier to trust when the two halves it is made of can be read
+   * separately.
+   */
+  perUnitCostUntargeted: number;
+  /**
+   * What one unit of a given menu item carries in `per-unit` costs: the
+   * untargeted floor plus every targeted cost that names it.
+   *
+   * This is what `itemMargins` uses, so a burger carries its box and a drink
+   * does not. Returns the blended figure for every item when the caller passed
+   * no mix — see the note in `resolveCosts` on why that is the pessimistic
+   * reading rather than the convenient one.
+   */
+  perUnitCostFor: (menuItemId: string) => number;
   /** Rupees charged on every ticket, from `per-order`. */
   perOrderCost: number;
   /** A true fraction of each rupee taken, from `per-revenue`. 0.18, not 18. */
@@ -1007,18 +1072,120 @@ export interface ResolvedCosts {
   averageBasket: number | null;
 }
 
+/**
+ * What sold, per menu item, with the category each item is in **now**.
+ *
+ * This is what lets a targeted `per-unit` cost be spread over the items it is
+ * actually charged against. `categoryId` is resolved here and nowhere else:
+ * `MenuItem.category` holds a category's *name* while `CostAppliesTo` stores
+ * its *id*, and doing that join in one documented place is what stops a second
+ * site from joining them the other way round and quietly matching nothing.
+ */
+export interface SalesMixEntry {
+  menuItemId: string;
+  /** The item's category by id, or undefined when it names none that exists. */
+  categoryId?: string;
+  units: number;
+}
+
+/**
+ * Builds the mix from a period's item performance.
+ *
+ * Deals are already handled by `itemPerformance`, which credits a deal's
+ * components with the units they represent — so a box charged to burgers is
+ * charged to the burgers inside a meal deal too, which is what actually
+ * happened at the grill.
+ */
+export function salesMix(
+  items: ItemPerformance[],
+  menuItems: MenuItem[],
+  categories: Category[],
+): SalesMixEntry[] {
+  const idOfCategoryNamed = new Map(categories.map(c => [c.name, c.id]));
+  return items.map(item => {
+    const menuItem = menuItems.find(m => m.id === item.menuItemId);
+    const categoryId = menuItem ? idOfCategoryNamed.get(menuItem.category) : undefined;
+    return {
+      menuItemId: item.menuItemId,
+      ...(categoryId ? { categoryId } : {}),
+      units: item.units,
+    };
+  });
+}
+
+/** Whether a targeted cost is charged against this item. */
+function targetCovers(appliesTo: CostAppliesTo, entry: SalesMixEntry): boolean {
+  return appliesTo.kind === 'items'
+    ? appliesTo.ids.includes(entry.menuItemId)
+    : entry.categoryId === appliesTo.id;
+}
+
 export function resolveCosts(
   costs: CostSummary,
   totals: Totals,
   scope: CostScope = 'range',
+  mix: SalesMixEntry[] | null = null,
 ): ResolvedCosts {
   const eventCosts = costs.byBasis['per-event'];
   const allocated = scope !== 'session';
 
+  /*
+   * Per-unit costs, split into the part every item carries and the part that
+   * only some do (ADR-022).
+   *
+   * `untargeted` is every per-unit cost that names nothing, which before this
+   * phase was all of them — so with no targets anywhere, `blended` below is
+   * exactly the old `byBasis['per-unit']` and the headline cannot move. That
+   * equality is the regression this phase is most at risk of, and it holds by
+   * construction rather than by arithmetic that happens to agree.
+   */
+  const targeted = costs.perUnitTargets;
+  const untargeted = costs.byBasis['per-unit']
+    - targeted.reduce((sum, t) => sum + t.amount, 0);
+
+  const byItem = new Map<string, number>();
+  let blendedExtra = 0;
+
+  /*
+   * A mix of `null` means the caller does not know what sold, which is not the
+   * same as nothing having sold. A targeted cost is then charged in full, to
+   * every item — the pre-ADR-022 reading, and the pessimistic one. Spreading it
+   * to zero instead would be the flattering answer produced automatically on
+   * data nobody looked at, which is invariant 2's failure one layer up.
+   */
+  if (mix === null) {
+    for (const t of targeted) blendedExtra += t.amount;
+  } else {
+    const totalUnits = mix.reduce((sum, e) => sum + e.units, 0);
+    for (const t of targeted) {
+      let coveredUnits = 0;
+      for (const entry of mix) {
+        if (!targetCovers(t.appliesTo, entry)) continue;
+        coveredUnits += entry.units;
+        byItem.set(entry.menuItemId, (byItem.get(entry.menuItemId) ?? 0) + t.amount);
+      }
+      // Weighted by the share of units it actually reaches. A cost on an item
+      // that is half of what sold contributes half its rate to the headline.
+      //
+      // This is the same kind of quantity as `averagePrice` and
+      // `averageBasket` — a property of the average sale — and not the circular
+      // rate ADR-012 removed, which divided a fixed rupee total by revenue so
+      // far and so had no bound. A blend of per-item rates never leaves the
+      // range of those rates, whatever the day does.
+      if (totalUnits > 0) blendedExtra += t.amount * (coveredUnits / totalUnits);
+    }
+  }
+
+  const perUnitCost = untargeted + blendedExtra;
+
   return {
     fixed: costs.byBasis['per-session'] + (allocated ? eventCosts : 0),
     heldEventCosts: allocated ? 0 : eventCosts,
-    perUnitCost: costs.byBasis['per-unit'],
+    perUnitCost,
+    perUnitCostUntargeted: untargeted,
+    perUnitCostFor: (menuItemId: string) => mix === null
+      ? perUnitCost
+      : untargeted + (byItem.get(menuItemId) ?? 0),
     perOrderCost: costs.byBasis['per-order'],
     revenueRate: costs.byBasis['per-revenue'] / 100,
     averageBasket: totals.orders > 0 ? totals.units / totals.orders : null,
@@ -1118,8 +1285,9 @@ export function breakEven(
   totals: Totals,
   costs: CostSummary,
   scope: CostScope = 'range',
+  mix: SalesMixEntry[] | null = null,
 ): BreakEven {
-  const resolved = resolveCosts(costs, totals, scope);
+  const resolved = resolveCosts(costs, totals, scope, mix);
   const base: BreakEven = {
     fixedCosts: resolved.fixed,
     heldEventCosts: resolved.heldEventCosts,

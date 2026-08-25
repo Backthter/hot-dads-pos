@@ -30,6 +30,7 @@ export function AnalyticsScreen({
     <AnalyticsView
       orders={orders}
       menuItems={menu.state.menuItems}
+      menuCategories={menu.state.categories}
       stockItems={stock.state.stockItems}
       assignments={menu.state.stockAssignments}
       movements={stock.state.stockMovements}

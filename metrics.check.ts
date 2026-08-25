@@ -8,7 +8,8 @@
 import {
   BREAK_EVEN_BLOCKED, attachmentPairs, breakEven, breakEvenByItem, costSummary, deadStock,
   foodCost, inventoryTurnover, itemMargins, itemPerformance, ledgerLevelsAt, queueBands,
-  resolveRange, shrinkageValue, stockPurchasesValue, stockoutStats, totalsFor, voidStats,
+  resolveCosts, resolveRange, salesMix, shrinkageValue, stockPurchasesValue, stockoutStats,
+  totalsFor, voidStats,
 } from './src/app/analytics/metrics';
 import { buildMovement, effectiveMovements, postMovements } from './src/app/lib/inventory';
 import {
@@ -31,7 +32,7 @@ import {
 } from './src/app/analytics/search';
 import type { CostSummary } from './src/app/analytics/metrics';
 import type {
-  CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
+  Category, CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
   OversellEvent, StockItem, StockMovement, TradingEvent, TradingSession,
 } from './src/app/types';
 
@@ -243,6 +244,149 @@ check('break-even by item uses today', beItems[0].contributionPerUnit, 110);
 check('and so it moved with the price', beItems[0].units, 1000 / 110);
 check('an uncosted item is absent, not estimated',
   breakEvenByItem(marginsAt(burger, 0), costsOf({ 'per-session': 1000 }), beTotals).length, 0);
+
+/* -------------------------------- a per-unit cost charged to some items only */
+// ADR-022. Ten burgers at Rs 100 and ten drinks at Rs 50, so burgers are
+// exactly half the units sold and the blend arithmetic can be read off by eye.
+// Ingredients: burger 30 + 10 = 40, drink 20.
+console.log('\nTargeted per-unit costs');
+
+const drink: MenuItem = {
+  id: 'd', name: 'Cola', price: 50, showInOrderMode: true, category: 'Drinks',
+};
+const foodCategory: Category = { id: 'cat-food', name: 'Food', order: 0 };
+const drinkCategory: Category = { id: 'cat-drinks', name: 'Drinks', order: 1 };
+
+const mixedOrders = [
+  order({ id: 'm1', items: [line('a', 'Burger', 10, 100, 40)], subtotal: 1000, total: 1000 }),
+  order({ id: 'm2', items: [line('d', 'Cola', 10, 50, 20)], subtotal: 500, total: 500 }),
+];
+const mixedTotals = totalsFor(mixedOrders);
+const mixedItems = itemPerformance(mixedOrders, [burger, drink], ALL);
+const bothRecipes: MenuItemStockAssignment[] = [
+  { menuItemId: 'a', stockItemId: 'st-beef', quantityPerItem: 1 },
+  { menuItemId: 'a', stockItemId: 'st-bun', quantityPerItem: 1 },
+  { menuItemId: 'd', stockItemId: 'st-syrup', quantityPerItem: 1 },
+];
+const bothKitchens = (bunCost = 10): StockItem[] => [
+  ...kitchen(bunCost),
+  { id: 'st-syrup', name: 'Syrup', quantity: 500, unit: 'pcs', lowStockThreshold: 0, costPerUnit: 20 },
+];
+
+const theMix = salesMix(mixedItems, [burger, drink], [foodCategory, drinkCategory]);
+check('the mix carries every item that sold', theMix.length, 2);
+check('with the units it sold', theMix.find(m => m.menuItemId === 'a')?.units, 10);
+check('and the category it is in now', theMix.find(m => m.menuItemId === 'a')?.categoryId, 'cat-food');
+
+const boxOnBurgers = costSummary([
+  cost({ id: 'k-fixed', amount: 1000, basis: 'per-session' }),
+  cost({
+    id: 'k-box', amount: 12, basis: 'per-unit',
+    appliesTo: { kind: 'items', ids: ['a'] },
+  }),
+]);
+
+// The blend: burgers are half the units, so a Rs 12 box on them is Rs 6 across
+// the average sale. Hand-computed, because this is the number the headline
+// break-even divides by.
+const blended = resolveCosts(boxOnBurgers, mixedTotals, 'range', theMix);
+check('a cost on half the units blends to half its rate', blended.perUnitCost, 6);
+check('nothing is charged to every item', blended.perUnitCostUntargeted, 0);
+check('the burger carries the whole box', blended.perUnitCostFor('a'), 12);
+check('and the drink carries none of it', blended.perUnitCostFor('d'), 0);
+
+// The same cost with no target is charged to everything, which is what every
+// row written before ADR-022 means.
+const boxOnEverything = costSummary([
+  cost({ id: 'k-fixed', amount: 1000, basis: 'per-session' }),
+  cost({ id: 'k-box', amount: 12, basis: 'per-unit' }),
+]);
+const flat = resolveCosts(boxOnEverything, mixedTotals, 'range', theMix);
+check('an untargeted cost is the whole rate', flat.perUnitCost, 12);
+check('and every item carries it', flat.perUnitCostFor('d'), 12);
+
+/* --- the regression that matters: the headline must not move ------------- */
+// Every figure below is computed with a mix and without one. For a cost set
+// that targets nothing the two must be identical — if this ever fails, ADR-022
+// has changed a number for every shop that never used it.
+const withMix = breakEven(mixedTotals, boxOnEverything, 'range', theMix);
+const withoutMix = breakEven(mixedTotals, boxOnEverything, 'range');
+check('break-even · untargeted, unchanged by the mix', withMix.units, withoutMix.units ?? 0);
+check('break-even · same contribution', withMix.contributionPerUnit, withoutMix.contributionPerUnit ?? 0);
+check('break-even · same revenue', withMix.revenue, withoutMix.revenue ?? 0);
+check('break-even · same per-unit cost', withMix.perUnitCost, withoutMix.perUnitCost ?? 0);
+
+// And a caller that knows no mix charges a targeted cost in full rather than
+// spreading it to nothing. Pessimistic on purpose: spreading to zero would be
+// the flattering answer produced automatically on data nobody looked at.
+const unknownMix = resolveCosts(boxOnBurgers, mixedTotals, 'range');
+check('no mix charges a targeted cost in full', unknownMix.perUnitCost, 12);
+check('to every item alike', unknownMix.perUnitCostFor('d'), 12);
+
+/* --- the per-item column ------------------------------------------------- */
+// A Rs 12 box on burgers moves the burger's margin today by exactly Rs 12 and
+// leaves the drink's alone. Against no per-unit cost at all: burger 100 − 40 =
+// 60, drink 50 − 20 = 30.
+const marginsFor = (costs: CostSummary, bunCost = 10) =>
+  itemMargins(mixedItems, [burger, drink], bothRecipes, bothKitchens(bunCost),
+    costs, mixedTotals, 'range', theMix);
+
+const noPerUnit = costSummary([cost({ id: 'k-fixed', amount: 1000, basis: 'per-session' })]);
+const before = marginsFor(noPerUnit);
+check('burger contribution before the box', before.find(m => m.menuItemId === 'a')?.today?.contributionPerUnit, 60);
+check('drink contribution before the box', before.find(m => m.menuItemId === 'd')?.today?.contributionPerUnit, 30);
+
+const after = marginsFor(boxOnBurgers);
+check('the box comes off the burger', after.find(m => m.menuItemId === 'a')?.today?.contributionPerUnit, 48);
+check('and not off the drink', after.find(m => m.menuItemId === 'd')?.today?.contributionPerUnit, 30);
+// Both sides of the margin carry the same rate, so a targeted cost cannot read
+// as a divergence between today's margin and the realised one.
+check('realised margin carries it too', after.find(m => m.menuItemId === 'a')?.realised?.contributionPerUnit, 48);
+check('and the item is not flagged as diverged', after.find(m => m.menuItemId === 'a')?.diverged, false);
+
+/* --- a category, and an item that has moved out of it -------------------- */
+const lidsOnDrinks = costSummary([
+  cost({ id: 'k-fixed', amount: 1000, basis: 'per-session' }),
+  cost({
+    id: 'k-lid', amount: 3, basis: 'per-unit',
+    appliesTo: { kind: 'category', id: 'cat-drinks' },
+  }),
+]);
+const byCategory = resolveCosts(lidsOnDrinks, mixedTotals, 'range', theMix);
+check('a category reaches the items in it', byCategory.perUnitCostFor('d'), 3);
+check('and not the ones outside it', byCategory.perUnitCostFor('a'), 0);
+check('blending over half the units', byCategory.perUnitCost, 1.5);
+
+// Move the burger into Drinks. Resolution is against the category the item is
+// in *now* — the shop saying "this is a drink" is the shop saying it takes a
+// lid — so the cost reaches it, and the blend follows.
+const burgerIsADrink = { ...burger, category: 'Drinks' };
+const movedMix = salesMix(
+  itemPerformance(mixedOrders, [burgerIsADrink, drink], ALL),
+  [burgerIsADrink, drink], [foodCategory, drinkCategory]);
+const afterMove = resolveCosts(lidsOnDrinks, mixedTotals, 'range', movedMix);
+check('an item that changed category is reached', afterMove.perUnitCostFor('a'), 3);
+check('and the blend follows it to every unit', afterMove.perUnitCost, 3);
+
+// A category id nothing answers to reaches nothing, and is not read as "all".
+const goneCategory = costSummary([
+  cost({
+    id: 'k-gone', amount: 9, basis: 'per-unit',
+    appliesTo: { kind: 'category', id: 'cat-deleted' },
+  }),
+]);
+const dangling = resolveCosts(goneCategory, mixedTotals, 'range', theMix);
+check('a target that matches nothing charges nothing', dangling.perUnitCost, 0);
+check('and no item picks it up', dangling.perUnitCostFor('a'), 0);
+
+/* --- invariant 2 holds through a targeted cost --------------------------- */
+// A cost you can resolve does not make an ingredient cost you cannot. The bun
+// has no price, so margin today is null however cleanly the box resolves.
+const incomplete = marginsFor(boxOnBurgers, 0).find(m => m.menuItemId === 'a');
+check('a targeted cost does not complete a recipe', incomplete?.today, null);
+check('and the missing ingredient is still named', incomplete?.missing, ['Buns']);
+check('while the drink beside it is unaffected',
+  marginsFor(boxOnBurgers, 0).find(m => m.menuItemId === 'd')?.today?.contributionPerUnit, 30);
 
 /* ------------------------------------------------------------ cost basis */
 // Each basis totals on its own and touches no other. The amounts are chosen so
