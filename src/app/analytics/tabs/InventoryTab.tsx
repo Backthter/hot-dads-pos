@@ -28,7 +28,7 @@ export function InventoryTab({
     <Screen>
       <Panel
         title="Inventory"
-        subtitle="Levels, cover and what is moving — arriving in Phase 1C-iii"
+        subtitle="Levels, cover and what is moving — arriving in Phase 1C-iv"
       >
         <div className="flex flex-col gap-[12px] py-[10px]" data-inventory-placeholder>
           <p className="text-[var(--app-text-secondary)] text-[14px] leading-[21px] max-w-[620px]">

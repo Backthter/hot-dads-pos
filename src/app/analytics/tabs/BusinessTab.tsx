@@ -16,7 +16,7 @@ import type {
  * Business — what's working?
  *
  * This is what the Sales tab held, unchanged and in the arrangement it had.
- * Phase 1C-i moves it; 1C-iii replaces it with the item and category tables.
+ * Phase 1C-i moves it; 1C-iv replaces it with the item and category tables.
  *
  * Everything arrives as a prop. In particular the item and category tables are
  * deliberately *not* recomputed here: they are the two most expensive things in

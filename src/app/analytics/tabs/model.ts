@@ -111,8 +111,16 @@ export const HISTORY_SOURCES: readonly HistorySourceDefinition[] = [
   { id: 'orders', label: 'Orders', locked: 'none' },
   // Quantities, not money. A stock history is the one place a locked till
   // still needs a straight answer.
-  { id: 'stock', label: 'Stock', locked: 'none', arriving: '1C-iii' },
-  { id: 'money', label: 'Money', locked: 'all', arriving: '1C-ii' },
+  //
+  // These two named the wrong phases until 1C-iii-a. `PHASE-1C.md` resequenced
+  // the work when 1C-ii was inserted — Money moved to 1C-iii and Stock to
+  // 1C-iv — and neither string followed. The program was telling the shop to
+  // expect a screen in a phase that had already been and gone, which is the
+  // second time a resequencing has left copy behind; the first was the
+  // fixed/variable hints 1C-ii-b removed. Whoever moves a phase moves the
+  // strings that name it.
+  { id: 'stock', label: 'Stock', locked: 'none', arriving: '1C-iv' },
+  { id: 'money', label: 'Money', locked: 'all', arriving: '1C-iii-b' },
 ];
 
 /**

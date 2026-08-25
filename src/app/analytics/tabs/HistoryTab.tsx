@@ -12,11 +12,14 @@ import type { MenuItem, Order, TradingEvent, TradingSession } from '../../types'
  * tabs. They answer the same question about different rows, and the shop is
  * more likely to want "what happened on Saturday" than "the orders screen".
  *
- * Only Orders has content in Phase 1C-i — `OrdersExplorer`, moved and otherwise
+ * Only Orders has content — `OrdersExplorer`, moved in 1C-i and otherwise
  * unchanged. Stock and Money are shown as empty states naming the phase that
  * fills them rather than hidden until they work: a selector that grows options
  * later is a selector nobody knows to look for, and being told a thing is
  * coming is more use than being shown a control with one option on it.
+ *
+ * The phases those states name are load-bearing copy and were wrong from the
+ * 1C resequencing until 1C-iii-a. See the note in `tabs/model.ts`.
  *
  * The lock is per source, not per tab. Orders and Stock are open with the
  * revenue PIN set — Stock because it is quantities, Orders because it always
@@ -72,7 +75,7 @@ export function HistoryTab({
       )}
 
       {source === 'stock' && (
-        <Panel title="Stock history" subtitle="Every delivery, sale, waste line and count — arriving in Phase 1C-iii">
+        <Panel title="Stock history" subtitle="Every delivery, sale, waste line and count — arriving in Phase 1C-iv">
           <div className="flex flex-col gap-[10px] py-[10px]" data-history-empty="stock">
             <p className="text-[var(--app-text-secondary)] text-[14px] leading-[21px] max-w-[620px]">
               The stock ledger already records every movement — what arrived, what a sale
@@ -88,7 +91,7 @@ export function HistoryTab({
       )}
 
       {source === 'money' && (
-        <Panel title="Money" subtitle="The costs you have logged, and what stock has cost you — arriving in Phase 1C-ii">
+        <Panel title="Money" subtitle="The costs you have logged, and what stock has cost you — arriving in Phase 1C-iii-b">
           <div className="flex flex-col gap-[10px] py-[10px]" data-history-empty="money">
             <p className="text-[var(--app-text-secondary)] text-[14px] leading-[21px] max-w-[620px]">
               This is where the money that is not a sale gets listed: what you logged

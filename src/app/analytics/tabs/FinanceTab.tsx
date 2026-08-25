@@ -11,13 +11,14 @@ import type {
 /**
  * Finance — did this pay?
  *
- * It absorbs what were the Overview and Costs tabs. The figures on it are the
- * ones Overview already carried, in the arrangement they already had: Phase
- * 1C-i is navigation, and 1C-ii replaces this content with the finance table
- * proper. Nothing here computes anything — every figure arrives as a prop,
- * resolved once by `AnalyticsView` against a scope that is held steady by value
- * (ADR-009). A tab that resolved its own scope would recompute on every clock
- * tick.
+ * It absorbs what were the Overview and Costs tabs. 1C-i moved the figures
+ * across unchanged, and 1C-iii-a put the table above them — the cards say how
+ * one period is doing, the table says which of several paid, and those are
+ * different questions.
+ *
+ * Nothing here computes anything: every figure arrives as a prop, resolved once
+ * by `AnalyticsView` against a scope held steady by value (ADR-009). A tab that
+ * resolved its own scope would recompute on every clock tick.
  *
  * Costs stopped being a destination in this phase. Logging a cost is something
  * you do *because* of what this screen says, so the way in is a button here
