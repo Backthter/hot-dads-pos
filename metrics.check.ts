@@ -7,7 +7,7 @@
  */
 import {
   BREAK_EVEN_BLOCKED, attachmentPairs, breakEven, breakEvenByItem, breakEvenCrossing, costSummary,
-  deadStock, financeRows, isReceipt, moneyLedger, perUnitChargeOf,
+  accumulate, deadStock, financeRows, isReceipt, moneyLedger, perUnitChargeOf,
   foodCost, inventoryTurnover, itemMargins, itemPerformance, ledgerLevelsAt, queueBands,
   receiptValue, resolveCosts, resolveEntryAmount, resolveRange, salesMix, shrinkageValue,
   stockPurchasesValue, stockoutStats, totalsFor, voidStats,
@@ -25,6 +25,11 @@ import {
   TRADING_EVENT_COLUMNS, tradingEventFromRow, tradingEventToRow,
 } from './src/db/tradingEventRows';
 import { renderCell, visibleColumns } from './src/app/analytics/DataTable';
+import {
+  applyFilter, describeGroup, fieldsFor, moneyFields,
+  type Condition, type Group, type Operator,
+} from './src/app/analytics/filters';
+import { chargeDetail, kindLabel } from './src/app/analytics/MoneyLedger';
 import type { DataColumn } from './src/app/analytics/DataTable';
 import { resolveScope, type Scope } from './src/app/analytics/scope';
 import {
@@ -1941,6 +1946,135 @@ check('then what the item costs now',
   receiptValue(mv({ delta: 5 }), [{ ...ledMince, costPerUnit: 900 }]), 4500);
 check('and otherwise it is not known',
   receiptValue(mv({ delta: 5 }), [ledMince]), null);
+
+/* --------------------------------------------------------- the filter tree */
+// `filters.ts` had no checks at all before 1C-iii-b — 300 lines of query
+// language, driving the one screen a shop uses to answer "what happened", with
+// nothing to fail if an operator was edited. That was found while generalising
+// it over the row type, which is a change that needs a regression to be safe
+// and did not have one. These are that regression, written against the orders
+// path so the generalisation is provably behaviour-preserving.
+console.log('\nThe filter tree');
+
+const filterOrders = [
+  order({ id: 'q1', orderNumber: '01', paid: 'cash', timestamp: T,
+    items: [line('a', 'Burger', 2, 100, 40)], subtotal: 200, total: 200 }),
+  order({ id: 'q2', orderNumber: '02', paid: 'transfer', timestamp: T + 2 * HOUR,
+    items: [line('d', 'Cola', 3, 50)], subtotal: 150, total: 150 }),
+  order({ id: 'q3', orderNumber: '03', paid: 'cash', timestamp: T + 4 * HOUR,
+    items: [line('a', 'Burger', 1, 100, 40), line('d', 'Cola', 1, 50)],
+    subtotal: 150, total: 150, notes: 'no onions' }),
+];
+const orderFields = fieldsFor([burger, drink], [], []);
+const where = (...children: Condition[]): Group =>
+  ({ id: 'g', combinator: 'and', children });
+const cond = (field: string, operator: Operator, value?: string | number, value2?: string | number):
+  Condition => ({ id: `c-${field}-${operator}`, field, operator, value, value2 });
+const matched = (group: Group) =>
+  applyFilter(filterOrders, group, orderFields).map(o => o.orderNumber);
+
+// An empty tree is not a filter. It has to match everything, or opening the
+// builder and adding nothing would empty the screen.
+check('an empty tree matches everything', matched(where()), ['01', '02', '03']);
+
+check('a money comparison', matched(where(cond('total', 'gt', 150))), ['01']);
+check('at least, inclusive', matched(where(cond('total', 'gte', 150))), ['01', '02', '03']);
+check('between, either way round',
+  matched(where(cond('total', 'between', 200, 100))), ['01', '02', '03']);
+check('an enum is', matched(where(cond('payment', 'eq', 'cash'))), ['01', '03']);
+check('an enum is not', matched(where(cond('payment', 'neq', 'cash'))), ['02']);
+check('one of a list', matched(where(cond('payment', 'in', 'transfer'))), ['02']);
+check('text contains', matched(where(cond('notes', 'contains', 'onion'))), ['03']);
+check('a field that is set', matched(where(cond('notes', 'exists'))), ['03']);
+check('and one that is not', matched(where(cond('notes', 'notExists'))), ['01', '02']);
+check('a date window',
+  matched(where(cond('date', 'between', T + HOUR, T + 5 * HOUR))), ['02', '03']);
+
+// Array-valued fields: an order's items. "Contains" holds if any line matches;
+// "does not contain" has to hold for every line, which is the asymmetry a
+// hand-rolled matcher gets wrong.
+check('contains an item', matched(where(cond('item', 'eq', 'Burger'))), ['01', '03']);
+check('does not contain an item', matched(where(cond('item', 'neq', 'Burger'))), ['02']);
+
+// ALL of, then ANY of.
+check('two conditions, both required',
+  matched(where(cond('payment', 'eq', 'cash'), cond('total', 'gt', 150))), ['01']);
+check('the same two, either accepted',
+  applyFilter(filterOrders,
+    { id: 'g', combinator: 'or', children: [cond('payment', 'eq', 'transfer'), cond('total', 'gt', 150)] },
+    orderFields).map(o => o.orderNumber),
+  ['01', '02']);
+// A nested group is the whole point of a tree rather than a list.
+check('a nested group binds its own way',
+  applyFilter(filterOrders, {
+    id: 'g', combinator: 'and', children: [
+      cond('payment', 'eq', 'cash'),
+      { id: 'g2', combinator: 'or', children: [cond('total', 'gt', 199), cond('notes', 'exists')] },
+    ],
+  }, orderFields).map(o => o.orderNumber),
+  ['01', '03']);
+
+// A saved search written against a field that has since been renamed returns
+// too much and is obvious, rather than returning nothing and looking like a
+// quiet day.
+check('an unknown field matches rather than excludes',
+  matched(where(cond('nosuchfield', 'eq', 'x'))), ['01', '02', '03']);
+
+// The sentence is what a saved search is stored under, so it has to say what
+// the tree actually does.
+check('the tree reads as a sentence',
+  describeGroup(where(cond('payment', 'eq', 'cash'), cond('total', 'gt', 150)), orderFields),
+  '(Payment method is cash and Total paid is more than 150)');
+check('and an empty one says so', describeGroup(where(), orderFields), 'Everything');
+
+/* --- the same language over money rows ----------------------------------- */
+const mktEvent: TradingEvent = { id: 'mkt', name: 'Winter Market', createdAt: T };
+const moneyFieldList = moneyFields([ledSession], [mktEvent], [ledMince]);
+const moneyMatched = (group: Group) =>
+  applyFilter(moneyRows.rows, group, moneyFieldList).map(r => r.id);
+
+check('rows by kind',
+  moneyMatched(where(cond('kind', 'eq', 'purchase'))), ['mov:m1', 'mov:m4']);
+// The basis is matched on its label, so a saved query reads as a sentence.
+check('costs by what they are charged per',
+  moneyMatched(where(cond('basis', 'eq', 'Share of sales'))), ['cost:k3']);
+check('what has no amount on file',
+  moneyMatched(where(cond('priced', 'eq', 'no'))), ['mov:m4']);
+check('what a stock item cost',
+  moneyMatched(where(cond('item', 'eq', 'Beef mince'))), ['mov:m1', 'mov:m4']);
+// A sales row and a session's own cost inherit the event from the session;
+// only the pitch fee names it directly. All three have to match.
+check('everything belonging to the market',
+  moneyMatched(where(cond('event', 'eq', 'Winter Market'))), ['cost:k1', 'cost:k2', 'ses:sat']);
+check('spending over a threshold',
+  moneyMatched(where(cond('out', 'gt', 1000))), ['mov:m1', 'cost:k1']);
+
+/* --- the running balance is over what is shown --------------------------- */
+// Filtering to the costs and keeping the whole ledger's balance would give a
+// Running column the reader cannot check against the rows in front of them.
+const costsOnly = accumulate(
+  applyFilter(moneyRows.rows, where(cond('kind', 'eq', 'cost')), moneyFieldList));
+check('a filtered ledger runs its own balance',
+  costsOnly.rows.map(r => r.running), [-1200, -2100, -2280]);
+check('and totals only what it shows', costsOnly.moneyOut, 2280);
+check('leaving the full ledger untouched', moneyRows.moneyOut, 6530);
+// Sorting is stable and does not depend on the order the sources were read in.
+check('accumulate orders by time',
+  accumulate([...moneyRows.rows].reverse()).rows.map(r => r.id),
+  moneyRows.rows.map(r => r.id));
+
+/* --- what the row says it is --------------------------------------------- */
+// Four bases behave completely differently over a period and the reader has no
+// other way to tell which they are looking at.
+check('a cost names what it is charged per',
+  kindLabel(moneyRows.rows[3]), 'Cost · Share of sales');
+check('a delivery just says what it is',
+  kindLabel(moneyRows.rows[0]), 'Stock bought');
+check('a session says sales', kindLabel(moneyRows.rows[5]), 'Sales');
+// 18% of Rs 1,000 — the sentence a reader cannot reconstruct from Rs 180 alone.
+check('a rate says what it was taken from',
+  chargeDetail(moneyRows.rows[3]), '18% of Rs 1,000 taken');
+check('a flat fee explains nothing', chargeDetail(moneyRows.rows[1]), null);
 
 console.log(`\n${failures === 0 ? 'All checks passed.' : `${failures} check(s) FAILED.`}`);
 process.exit(failures === 0 ? 0 : 1);
