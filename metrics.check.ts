@@ -6,7 +6,8 @@
  * something to fail against. Run with `npx tsx metrics.check.ts`.
  */
 import {
-  BREAK_EVEN_BLOCKED, attachmentPairs, breakEven, breakEvenByItem, costSummary, deadStock,
+  BREAK_EVEN_BLOCKED, attachmentPairs, breakEven, breakEvenByItem, breakEvenCrossing, costSummary,
+  deadStock, perUnitChargeOf,
   foodCost, inventoryTurnover, itemMargins, itemPerformance, ledgerLevelsAt, queueBands,
   resolveCosts, resolveRange, salesMix, shrinkageValue, stockPurchasesValue, stockoutStats,
   totalsFor, voidStats,
@@ -30,7 +31,7 @@ import {
 import {
   categoryIndex, matchesSearch, parseSearch, searchHaystack, sessionIndex,
 } from './src/app/analytics/search';
-import type { CostSummary } from './src/app/analytics/metrics';
+import type { CostScope, CostSummary, SalesMixEntry } from './src/app/analytics/metrics';
 import type {
   Category, CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
   OversellEvent, StockItem, StockMovement, TradingEvent, TradingSession,
@@ -400,6 +401,165 @@ check('a targeted cost does not complete a recipe', incomplete?.today, null);
 check('and the missing ingredient is still named', incomplete?.missing, ['Buns']);
 check('while the drink beside it is unaffected',
   marginsFor(boxOnBurgers, 0).find(m => m.menuItemId === 'd')?.today?.contributionPerUnit, 30);
+
+/* ------------------------------- when the period paid for itself (ADR-024) */
+// Six tickets, each five burgers at Rs 100 with Rs 40 frozen on every line:
+// Rs 500 of revenue and Rs 200 of ingredients, so Rs 300 of contribution each.
+// Against Rs 1,000 of fixed costs the running total is 300 / 600 / 900 / 1200,
+// so ticket 4 is the one that pays for the day. Every figure below is chosen so
+// the crossing lands on a nameable ticket rather than near a boundary.
+console.log('\nBreak-even crossing');
+
+const crossTicket = (n: number, over: Partial<Order> = {}) => order({
+  id: `x${n}`,
+  orderNumber: String(n).padStart(2, '0'),
+  sessionTicket: n,
+  timestamp: T + n * 60_000,
+  items: [line('a', 'Burger', 5, 100, 40)],
+  subtotal: 500,
+  total: 500,
+  ...over,
+});
+const crossOrders = [1, 2, 3, 4, 5, 6].map(n => crossTicket(n));
+const crossTotals = totalsFor(crossOrders);
+const crossMix = salesMix(
+  itemPerformance(crossOrders, [burger, drink], ALL),
+  [burger, drink], [foodCategory, drinkCategory]);
+const crossingOf = (
+  orders: Order[],
+  costs: CostSummary,
+  scope: CostScope = 'range',
+  mix: SalesMixEntry[] | null = crossMix,
+) => breakEvenCrossing(orders, [burger, drink], costs, totalsFor(orders), scope, mix);
+
+const fixedOnly = costsOf({ 'per-session': 1000 });
+const plain = crossingOf(crossOrders, fixedOnly);
+check('the crossing names a ticket', plain.order?.number, '04');
+check('and the kitchen number beside it', plain.order?.sessionTicket, 4);
+check('and when it happened', plain.order?.at, T + 4 * 60_000);
+check('with the contribution banked by then', plain.contributionAt, 1200);
+check('nothing left to cover', plain.remaining, 0);
+check('every ticket carried a cost', plain.coverage, 1);
+check('and it is not blocked', plain.blocked, undefined);
+
+/* --- the regression: a crossing is a measurement and does not move -------- */
+// This is the check that fails if a period average gets back into the
+// contribution. Break-even revenue is a target and may move as the day's
+// average sale changes; a crossing is a fact about a moment that has already
+// happened, and an afternoon of trading must not slide it.
+const afterFour = crossingOf(crossOrders.slice(0, 4), fixedOnly);
+const afterSix = crossingOf(crossOrders, fixedOnly);
+check('the crossing does not move as the day fills up', afterSix.order?.id, afterFour.order?.id ?? '');
+check('nor does the moment it happened', afterSix.order?.at, afterFour.order?.at ?? 0);
+check('nor the contribution banked by then', afterSix.contributionAt, afterFour.contributionAt ?? 0);
+// The same said the other way: two more tickets change the period's totals
+// completely, and the answer is identical.
+check('totals moved underneath it', afterSix.contribution !== afterFour.contribution, true);
+
+/* --- an uncosted ticket contributes nothing ------------------------------ */
+// Ticket 2 has no frozen cost. Counting it at zero cost would give it Rs 500 of
+// contribution — 300 / 800 / 1100 — and put the crossing at ticket 3, earlier
+// than the truth and in the flattering direction (invariant 2). Skipping it
+// gives 300 / — / 600 / 900 / 1200 and puts it at ticket 5, which is never
+// earlier than the truth, so the screen can say "or earlier".
+const withUncosted = [
+  crossTicket(1),
+  crossTicket(2, { items: [line('a', 'Burger', 5, 100)] }),
+  crossTicket(3), crossTicket(4), crossTicket(5), crossTicket(6),
+];
+const uncostedRun = crossingOf(withUncosted, fixedOnly);
+check('an uncosted ticket is skipped, not counted at zero', uncostedRun.order?.number, '05');
+check('and the flattering answer is not given', uncostedRun.order?.number !== '03', true);
+check('coverage says how much was left out', uncostedRun.coverage, 5 / 6);
+
+/* --- the rates each move it, one at a time ------------------------------- */
+// Rs 60 a ticket: contribution 240, so 240 / 480 / 720 / 960 / 1200 → ticket 5.
+check('a per-ticket cost moves the crossing',
+  crossingOf(crossOrders, costsOf({ 'per-session': 1000, 'per-order': 60 })).order?.number, '05');
+// 20% of takings: 500 − 200 − 100 = 200 a ticket, so ticket 5 exactly covers it.
+check('a share of takings moves it',
+  crossingOf(crossOrders, costsOf({ 'per-session': 1000, 'per-revenue': 20 })).order?.number, '05');
+// Rs 12 an item across five burgers is Rs 60 a ticket: the same as above.
+check('an untargeted per-item cost moves it',
+  crossingOf(crossOrders, costsOf({ 'per-session': 1000, 'per-unit': 12 })).order?.number, '05');
+
+/* --- ADR-022 flows through: a targeted cost reaches only its items -------- */
+const boxOnBurger = costSummary([
+  cost({ id: 'x-fixed', amount: 1000, basis: 'per-session' }),
+  cost({
+    id: 'x-box', amount: 12, basis: 'per-unit',
+    appliesTo: { kind: 'items', ids: ['a'] },
+  }),
+]);
+const boxOnDrink = costSummary([
+  cost({ id: 'x-fixed', amount: 1000, basis: 'per-session' }),
+  cost({
+    id: 'x-lid', amount: 12, basis: 'per-unit',
+    appliesTo: { kind: 'items', ids: ['d'] },
+  }),
+]);
+check('a cost targeted at what sold moves the crossing',
+  crossingOf(crossOrders, boxOnBurger).order?.number, '05');
+check('a cost targeted at what did not sell does not',
+  crossingOf(crossOrders, boxOnDrink).order?.number, '04');
+
+/* --- a deal charges its components ---------------------------------------- */
+// itemPerformance credits a deal's components with the units they represent and
+// salesMix is built from that, so the crossing has to charge them the same way
+// or the two would disagree about the same deal.
+const mealDeal: MenuItem = {
+  id: 'meal', name: 'Meal deal', price: 220, showInOrderMode: true, category: 'Deals',
+  dealItems: [{ menuItemId: 'a', name: 'Burger', quantity: 2 }],
+};
+const dealOrder = order({
+  id: 'deal1',
+  items: [{ ...line('meal', 'Meal deal', 3, 220, 90), dealItems: mealDeal.dealItems }],
+});
+check('a deal charges the items inside it',
+  perUnitChargeOf(dealOrder, [burger, mealDeal], id => (id === 'a' ? 12 : 0)), 12 * 2 * 3);
+check('and a plain line charges itself',
+  perUnitChargeOf(crossTicket(1), [burger], id => (id === 'a' ? 12 : 0)), 60);
+check('an item the cost does not name is charged nothing',
+  perUnitChargeOf(crossTicket(1), [burger], () => 0), 0);
+
+/* --- ADR-013: what the session owes, and what the event does -------------- */
+// From a session scope the event's Rs 500 is held back, so only Rs 1,000 has to
+// be covered and ticket 4 does it. From the event's own scope all Rs 1,500 is
+// owed, and that takes until ticket 5.
+const withEvent = costsOf({ 'per-session': 1000, 'per-event': 500 });
+const crossInSession = crossingOf(crossOrders, withEvent, 'session');
+check('a session crosses on its own costs', crossInSession.order?.number, '04');
+check('and is told what the event is holding', crossInSession.heldEventCosts, 500);
+check('which is not in what it had to cover', crossInSession.fixedCosts, 1000);
+const crossAsEvent = crossingOf(crossOrders, withEvent, 'event');
+check('the event owes all of it', crossAsEvent.fixedCosts, 1500);
+check('so it crosses later', crossAsEvent.order?.number, '05');
+check('and holds nothing back', crossAsEvent.heldEventCosts, 0);
+
+/* --- a void moves it on --------------------------------------------------- */
+// Voiding the ticket that caused the crossing must hand it to the next one
+// (invariant 5), not leave it pointing at an order that no longer counts.
+const voidedFour = crossOrders.map(o =>
+  (o.id === 'x4' ? { ...o, voidedAt: T + 9 * 60_000, voidReason: 'walked off' } : o));
+check('voiding the crossing ticket moves it on',
+  crossingOf(voidedFour, fixedOnly).order?.number, '05');
+
+/* --- every blocked reason is reachable ------------------------------------ */
+check('no fixed costs, nothing to cross',
+  crossingOf(crossOrders, costsOf({ 'per-unit': 10 })).blocked, BREAK_EVEN_BLOCKED.noFixedCosts);
+check('no costed ticket in the period',
+  crossingOf(
+    [crossTicket(1, { items: [line('a', 'Burger', 5, 100)] })], fixedOnly,
+  ).blocked, BREAK_EVEN_BLOCKED.noCostedSales);
+const notThereYet = crossingOf(crossOrders, costsOf({ 'per-session': 100_000 }));
+check('a day that has not got there yet', notThereYet.blocked, BREAK_EVEN_BLOCKED.notYet);
+check('and says how far there is to go', notThereYet.remaining, 100_000 - 1800);
+check('with no ticket named', notThereYet.order, null);
+// Rs 200 an item over five items is Rs 1,000 a ticket against Rs 300 of margin:
+// the running total falls, and no volume ever covers anything.
+check('a menu that never will',
+  crossingOf(crossOrders, costsOf({ 'per-session': 1000, 'per-unit': 200 })).blocked,
+  BREAK_EVEN_BLOCKED.negativeContribution);
 
 /* ------------------------------------------------------------ cost basis */
 // Each basis totals on its own and touches no other. The amounts are chosen so

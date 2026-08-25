@@ -1205,6 +1205,11 @@ export const BREAK_EVEN_BLOCKED = {
   noFixedCosts: 'No fixed costs logged',
   negativeContribution: 'Costs exceed the margin — no volume breaks even',
   noBasket: 'Needs a ticket count to spread the per-order costs',
+  // Only `breakEvenCrossing` uses this one. Break-even revenue is a target and
+  // is always answerable; a crossing is a measurement, and "it has not happened
+  // yet" is a real answer rather than a missing one. `remaining` carries how far
+  // there is to go, so the column reads "Rs 4,300 to go" and not an em dash.
+  notYet: 'Not yet — the period has not covered its costs',
 } as const;
 
 export interface BreakEven {
@@ -1356,6 +1361,201 @@ export function breakEven(
     revenue,
     units,
     progress: revenue > 0 ? totals.netRevenue / revenue : null,
+  };
+}
+
+/* ------------------------------------- when the period paid for itself */
+
+/**
+ * What one ticket's `per-unit` costs come to (ADR-022).
+ *
+ * A **deal** charges its components, not itself. `itemPerformance` credits a
+ * deal's components with the units they represent, and `salesMix` is built from
+ * that — so a box charged to burgers has to reach the burger inside a meal deal
+ * here too, or the crossing and the blended rate would disagree about the same
+ * deal while both claiming to be about per-unit costs.
+ *
+ * Exported so it can be checked on its own; nothing else should need it.
+ */
+export function perUnitChargeOf(
+  order: Order,
+  menuItems: MenuItem[],
+  rateFor: (menuItemId: string) => number,
+): number {
+  let charge = 0;
+  for (const item of order.items) {
+    if (item.dealItems?.length) {
+      for (const component of item.dealItems) {
+        const sub = resolveDealComponent(component, menuItems);
+        if (!sub) continue;
+        charge += rateFor(sub.id) * component.quantity * item.quantity;
+      }
+    } else {
+      charge += rateFor(item.menuItemId) * item.quantity;
+    }
+  }
+  return charge;
+}
+
+export interface BreakEvenCrossing {
+  /**
+   * The ticket that took the period past its costs, or `null` if it has not got
+   * there. No display decision is made here — the lifetime number and the
+   * kitchen's number are both returned, because which one a screen wants
+   * depends on whether it is showing a live session (see `displayNumber`).
+   */
+  order: {
+    id: string;
+    /** The lifetime sequence, which is what History · Orders shows. */
+    number: string;
+    /** The kitchen's number within its session, when it has one. */
+    sessionTicket?: number;
+    at: number;
+  } | null;
+  /** Contribution banked by the end of that ticket. Null when not crossed. */
+  contributionAt: number | null;
+  /** Rupees that had to be covered — `ResolvedCosts.fixed`. */
+  fixedCosts: number;
+  /** Contribution banked across the whole period. */
+  contribution: number;
+  /** Still to cover. Zero once crossed. */
+  remaining: number;
+  /**
+   * Share of the period's tickets that carried a complete ingredient cost,
+   * 0..1. Below 1 the true crossing may be **earlier** than the one reported —
+   * see the note on uncosted tickets below.
+   */
+  coverage: number;
+  /** Per-event rupees left out of `fixedCosts` in a session scope (ADR-013). */
+  heldEventCosts: number;
+  /** Why there is no crossing to report, when there is not. */
+  blocked?: string;
+}
+
+/**
+ * The ticket and the moment a period covered its costs.
+ *
+ * Break-even revenue says *how much* has to be taken. This says *when it was*,
+ * which is the question a shop actually asks at the end of a market — and it is
+ * the one figure on the Finance table that is a fact about the past rather than
+ * a target for the future.
+ *
+ * **Each ticket is charged on its own terms, and that is the whole design.**
+ * Contribution for one order is
+ *
+ * ```
+ *   netRevenue
+ *     − cogs                                  frozen at checkout (invariant 3)
+ *     − netRevenue × revenueRate               per-revenue
+ *     − perOrderCost                           per-order, one ticket
+ *     − Σ lines: perUnitCostFor(item) × qty    per-unit, deals credited
+ * ```
+ *
+ * Every term is a property of *that ticket* and of the **cost rates**, which
+ * come from the cost entries. Nothing here divides by a period average — not
+ * `averagePrice`, not `averageBasket`, not `cogsRatio`. So the running total
+ * after ticket *N* depends on tickets 1..N and nothing else, and ringing up
+ * ticket *N+1* cannot move a crossing that has already happened.
+ *
+ * That is stronger than `breakEven` manages. Break-even revenue is a target and
+ * is allowed to shift as the day's average sale changes; a crossing is a
+ * measurement, and a measurement that slid backwards as the afternoon went on
+ * would be the ADR-012 defect wearing a different hat. It does still move when
+ * the shop **logs a cost later** — the day genuinely cost more than was
+ * recorded — which is correct, and is the only thing that may move it. See
+ * ADR-024.
+ *
+ * **An uncosted ticket contributes nothing.** A line with no `unitCost` has no
+ * knowable margin, and reading the missing cost as zero would make that ticket's
+ * contribution too large and the crossing too early — invariant 2's failure, in
+ * the flattering direction, on exactly the data nobody can check. Skipping the
+ * ticket errs the other way: the crossing reported is never earlier than the
+ * truth, so a screen can honestly say *"passed at ticket 34 — or earlier; 6% of
+ * tickets carry no ingredient cost"*. `coverage` is returned so it can say that
+ * without walking the orders again.
+ *
+ * Voided orders are skipped outright (invariant 5), so voiding the ticket that
+ * caused the crossing correctly moves it on to the next one.
+ */
+export function breakEvenCrossing(
+  orders: Order[],
+  menuItems: MenuItem[],
+  costs: CostSummary,
+  totals: Totals,
+  scope: CostScope = 'range',
+  mix: SalesMixEntry[] | null = null,
+): BreakEvenCrossing {
+  const resolved = resolveCosts(costs, totals, scope, mix);
+  const base: BreakEvenCrossing = {
+    order: null,
+    contributionAt: null,
+    fixedCosts: resolved.fixed,
+    contribution: 0,
+    remaining: resolved.fixed,
+    coverage: 0,
+    heldEventCosts: resolved.heldEventCosts,
+  };
+
+  if (resolved.fixed <= 0) {
+    return { ...base, blocked: BREAK_EVEN_BLOCKED.noFixedCosts };
+  }
+
+  // Oldest first, and sorted here rather than trusted from the caller: a
+  // crossing read off an arbitrary sequence is not a fact about anything.
+  const chronological = orders
+    .filter(o => !o.voidedAt)
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  let running = 0;
+  let costedTickets = 0;
+  let crossing: BreakEvenCrossing['order'] = null;
+  let contributionAt: number | null = null;
+
+  for (const order of chronological) {
+    const money = orderMoney(order);
+    // Every line, or the ticket sits this out. A partly costed ticket has no
+    // honest contribution and is not worth guessing at.
+    if (money.costCoverage < 1) continue;
+    costedTickets += 1;
+
+    const contribution = money.netRevenue
+      - money.cogs
+      - money.netRevenue * resolved.revenueRate
+      - resolved.perOrderCost
+      - perUnitChargeOf(order, menuItems, id => resolved.perUnitCostFor(id));
+
+    running += contribution;
+    if (crossing === null && running >= resolved.fixed) {
+      crossing = {
+        id: order.id,
+        number: order.orderNumber,
+        ...(order.sessionTicket !== undefined ? { sessionTicket: order.sessionTicket } : {}),
+        at: order.timestamp,
+      };
+      contributionAt = running;
+    }
+  }
+
+  const settled: BreakEvenCrossing = {
+    ...base,
+    order: crossing,
+    contributionAt,
+    contribution: running,
+    remaining: Math.max(0, resolved.fixed - running),
+    coverage: chronological.length > 0 ? costedTickets / chronological.length : 0,
+  };
+
+  if (costedTickets === 0) {
+    return { ...settled, blocked: BREAK_EVEN_BLOCKED.noCostedSales };
+  }
+  if (crossing !== null) return settled;
+  // Not crossed, and the two reasons are worth telling apart: one is a day that
+  // has not sold enough yet, the other is a menu that never will.
+  return {
+    ...settled,
+    blocked: running > 0
+      ? BREAK_EVEN_BLOCKED.notYet
+      : BREAK_EVEN_BLOCKED.negativeContribution,
   };
 }
 
