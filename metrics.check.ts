@@ -7,10 +7,10 @@
  */
 import {
   BREAK_EVEN_BLOCKED, attachmentPairs, breakEven, breakEvenByItem, breakEvenCrossing, costSummary,
-  deadStock, financeRows, perUnitChargeOf,
+  deadStock, financeRows, isReceipt, moneyLedger, perUnitChargeOf,
   foodCost, inventoryTurnover, itemMargins, itemPerformance, ledgerLevelsAt, queueBands,
-  resolveCosts, resolveRange, salesMix, shrinkageValue, stockPurchasesValue, stockoutStats,
-  totalsFor, voidStats,
+  receiptValue, resolveCosts, resolveEntryAmount, resolveRange, salesMix, shrinkageValue,
+  stockPurchasesValue, stockoutStats, totalsFor, voidStats,
 } from './src/app/analytics/metrics';
 import { buildMovement, effectiveMovements, postMovements } from './src/app/lib/inventory';
 import {
@@ -1678,6 +1678,269 @@ check(
     .every(l => !(resolveLock(l, true).hidden && resolveLock(l, true).moneyHidden)),
   true,
 );
+
+/* ------------------------------------------------- a cost entry, as money */
+// `CostEntry.amount` is rupees on two bases and a rate on three. The whole of
+// this section exists because putting `amount` in a money column produces
+// "Rs 18" for a commission that cost Rs 640 — a plausible number that is not
+// money, and convention 4's exact failure.
+console.log('\nA cost entry, as money');
+
+const ledMix = salesMix(
+  itemPerformance(beOrders, [burger, drink], ALL),
+  [burger, drink], [foodCategory, drinkCategory]);
+// Two orders, ten burgers, Rs 1,000 of net revenue. Every figure below is that
+// period's own volumes and nothing else.
+const charged = (over: Partial<CostEntry>, mix: SalesMixEntry[] | null = ledMix) =>
+  resolveEntryAmount(cost(over), beTotals, mix);
+
+check('a per-session fee is the amount typed',
+  charged({ amount: 1200, basis: 'per-session' }).amount, 1200);
+check('and has nothing to derive',
+  charged({ amount: 1200, basis: 'per-session' }).charge, null);
+check('a per-event fee is the amount typed',
+  charged({ amount: 900, basis: 'per-event' }).amount, 900);
+
+// Rs 4 a ticket over two tickets.
+check('a per-ticket rate is charged per ticket',
+  charged({ amount: 4, basis: 'per-order' }).amount, 8);
+check('and says what it was charged against',
+  charged({ amount: 4, basis: 'per-order' }).charge?.base, 2);
+
+// THE check. 18 percentage points over Rs 1,000 is Rs 180. If this ever reads
+// 18, somebody has put `entry.amount` in a rupee column.
+check('a percentage is never shown as rupees',
+  charged({ amount: 18, basis: 'per-revenue' }).amount, 180);
+check('and the rate is kept beside it, not instead of it',
+  charged({ amount: 18, basis: 'per-revenue' }).charge?.rate, 18);
+check('with the revenue it was taken from',
+  charged({ amount: 18, basis: 'per-revenue' }).charge?.base, 1000);
+
+// Rs 12 an item over ten items.
+check('a per-item rate is charged per item',
+  charged({ amount: 12, basis: 'per-unit' }).amount, 120);
+// ADR-022: a cost that names items reaches only those items' units.
+check('targeted at what sold, it is charged in full',
+  charged({ amount: 12, basis: 'per-unit', appliesTo: { kind: 'items', ids: ['a'] } }).amount, 120);
+check('targeted at what did not sell, it is charged nothing',
+  charged({ amount: 12, basis: 'per-unit', appliesTo: { kind: 'items', ids: ['d'] } }).amount, 0);
+check('and the row can say how far it reached',
+  charged({ amount: 12, basis: 'per-unit', appliesTo: { kind: 'items', ids: ['d'] } }).charge?.covered, 0);
+// With no mix the target is charged against everything, matching resolveCosts:
+// the pessimistic reading, because the flattering one would be the default on
+// data nobody looked at (invariant 2, one layer up).
+check('with no mix a targeted cost is charged in full',
+  charged({ amount: 12, basis: 'per-unit', appliesTo: { kind: 'items', ids: ['d'] } }, null).amount, 120);
+
+/* --- the reconciliation: one entry at a time must total to the headline --- */
+// Two functions answering one question is how `foodCost` and
+// `stockPurchasesValue` came to disagree about a single delivery (ADR-014).
+// `resolveCosts` spreads a rate across a period; `resolveEntryAmount` charges
+// one entry over the same period. Summing the second must give the first, or
+// the ledger and the Finance tab are quietly reporting different money.
+const reconEntries = [
+  cost({ id: 'r1', amount: 1200, basis: 'per-session' }),
+  cost({ id: 'r2', amount: 900, basis: 'per-event', eventId: 'mkt' }),
+  cost({ id: 'r3', amount: 4, basis: 'per-order' }),
+  cost({ id: 'r4', amount: 18, basis: 'per-revenue' }),
+  cost({ id: 'r5', amount: 5, basis: 'per-unit' }),
+  cost({ id: 'r6', amount: 12, basis: 'per-unit', appliesTo: { kind: 'items', ids: ['a'] } }),
+  cost({ id: 'r7', amount: 7, basis: 'per-unit', appliesTo: { kind: 'items', ids: ['d'] } }),
+];
+const reconcile = (mix: SalesMixEntry[] | null) => {
+  const r = resolveCosts(costSummary(reconEntries), beTotals, 'range', mix);
+  const units = mix === null ? beTotals.units : mix.reduce((s, e) => s + e.units, 0);
+  const per = (basis: CostBasis) => reconEntries
+    .filter(e => e.basis === basis)
+    .reduce((s, e) => s + resolveEntryAmount(e, beTotals, mix).amount, 0);
+  return {
+    fixed: [per('per-session') + per('per-event'), r.fixed],
+    order: [per('per-order'), r.perOrderCost * beTotals.orders],
+    unit: [per('per-unit'), r.perUnitCost * units],
+    revenue: [per('per-revenue'), r.revenueRate * beTotals.netRevenue],
+  };
+};
+const agreed = reconcile(ledMix);
+check('entry by entry, the fixed costs agree', agreed.fixed[0], agreed.fixed[1]);
+check('and the per-ticket costs agree', agreed.order[0], agreed.order[1]);
+check('and the per-item costs agree', agreed.unit[0], agreed.unit[1]);
+check('and the share of takings agrees', agreed.revenue[0], agreed.revenue[1]);
+// 5 x 10 untargeted, 12 x 10 on what sold, 7 x 0 on what did not.
+check('and the per-item total is the hand figure', agreed.unit[0], 170);
+// The same identity where the caller knows nothing about the mix, which is the
+// branch where the two functions are most likely to drift apart.
+const agreedBlind = reconcile(null);
+check('they agree with no mix either', agreedBlind.unit[0], agreedBlind.unit[1]);
+check('at the pessimistic figure', agreedBlind.unit[0], 240);
+
+/* ------------------------------------------------------- the money ledger */
+console.log('\nThe money ledger');
+
+const ledMince: StockItem = {
+  id: 'ledMince', name: 'Beef mince', quantity: 0, unit: 'kg',
+  lowStockThreshold: 0, costPerUnit: 0,
+};
+const mv = (over: Partial<StockMovement>): StockMovement => ({
+  id: 'm', stockItemId: 'ledMince', delta: 0, resulting: 0, reason: 'added',
+  timestamp: T, ...over,
+});
+const ledSession: TradingSession = {
+  id: 'sat', name: 'Saturday', status: 'ended', startedAt: T,
+  endedAt: T + 5 * HOUR, ticketCounter: 2, pausedMs: 0, eventId: 'mkt',
+};
+const ledOrders = [
+  order({ id: 'l1', sessionId: 'sat', timestamp: T + HOUR, paid: 'cash',
+    items: [line('a', 'Burger', 5, 100, 40)], subtotal: 500, total: 500 }),
+  order({ id: 'l2', sessionId: 'sat', timestamp: T + 2 * HOUR, paid: 'transfer',
+    items: [line('a', 'Burger', 5, 100, 40)], subtotal: 500, total: 500 }),
+];
+const ledMovements = [
+  mv({ id: 'm1', delta: 5, totalCost: 4250, timestamp: T - HOUR }),
+  // A correction is somebody reconciling the shelf with the book. No money
+  // moved, so no row — ADR-014, and the same predicate stockPurchasesValue uses.
+  mv({ id: 'm2', delta: 3, reason: 'correction', totalCost: 99, timestamp: T }),
+  // An undone delivery is not an outlay (ADR-017). Both halves carry `reversed`.
+  mv({ id: 'm3', delta: 2, totalCost: 500, reversed: true, timestamp: T }),
+  // Entered with no price at all, and the item has no cost on file either.
+  mv({ id: 'm4', delta: 1, timestamp: T + 3 * HOUR }),
+];
+const ledCosts = [
+  cost({ id: 'k1', amount: 1200, basis: 'per-session', sessionId: 'sat',
+    note: 'Stall pitch fee', timestamp: T + 30 * 60_000 }),
+  cost({ id: 'k2', amount: 900, basis: 'per-event', eventId: 'mkt',
+    note: 'Market pitch', timestamp: T + 40 * 60_000 }),
+  cost({ id: 'k3', amount: 18, basis: 'per-revenue',
+    note: 'Delivery commission', timestamp: T + 50 * 60_000 }),
+];
+const ledRange = { start: T - 2 * HOUR, end: T + 100 * HOUR };
+const moneyRows = moneyLedger({
+  orders: ledOrders, costs: ledCosts, movements: ledMovements,
+  stockItems: [ledMince], sessions: [ledSession],
+  mix: salesMix(itemPerformance(ledOrders, [burger, drink], ALL),
+    [burger, drink], [foodCategory, drinkCategory]),
+  range: ledRange,
+});
+
+check('the ledger runs oldest first',
+  moneyRows.rows.map(r => r.id),
+  ['mov:m1', 'cost:k1', 'cost:k2', 'cost:k3', 'mov:m4', 'ses:sat']);
+check('a correction is not a purchase',
+  moneyRows.rows.some(r => r.id === 'mov:m2'), false);
+check('an undone delivery leaves no row',
+  moneyRows.rows.some(r => r.id === 'mov:m3'), false);
+
+// The delivery, as typed in.
+check('a delivery costs what it was entered at', moneyRows.rows[0].moneyOut, 4250);
+// The pitch fee, as typed in. A flat fee derives nothing.
+check('a flat fee is the amount typed', moneyRows.rows[1].moneyOut, 1200);
+check('and shows no derivation', moneyRows.rows[1].charge, null);
+// 18% of Rs 1,000. The ledger's half of the check above.
+check('a rate reaches the column as money', moneyRows.rows[3].moneyOut, 180);
+check('and never as the rate itself', moneyRows.rows[3].moneyOut !== 18, true);
+
+// Invariant 2 at the last row it can be broken at.
+check('an unpriced delivery has no amount', moneyRows.rows[4].moneyOut, null);
+check('and is counted, not guessed at', moneyRows.unpriced, 1);
+check('so the running total does not move over it',
+  moneyRows.rows[4].running, moneyRows.rows[3].running);
+
+// One row for the session, not two for the tickets.
+check('sales roll up per session', moneyRows.rows[5].kind, 'sales');
+check('and say how many tickets they are', moneyRows.rows[5].label, 'Saturday — 2 orders');
+check('valued at what came in', moneyRows.rows[5].moneyIn, 1000);
+
+// 4250 + 1200 + 900 + 180 out, 1000 in.
+check('money out totals the outgoing rows', moneyRows.moneyOut, 6530);
+check('money in totals the incoming ones', moneyRows.moneyIn, 1000);
+check('and the last running figure is the difference',
+  moneyRows.rows[moneyRows.rows.length - 1].running, -5530);
+check('the running column accumulates down the page',
+  moneyRows.rows.map(r => r.running), [-4250, -5450, -6350, -6530, -6530, -5530]);
+check('the till splits by how it was taken', [moneyRows.cash, moneyRows.transfer], [500, 500]);
+
+/* --- ADR-025: a cash ledger shows what left the till, Finance does not ---- */
+// The same pitch fee, in the same session scope, read two ways. The ledger
+// shows it because the money left the till that day; the Finance row holds it
+// back because charging one afternoon for a whole market's pitch is a claim
+// about that afternoon's economics (ADR-013). Both are right, and asserting
+// them together is what stops one being "fixed" to match the other.
+const ledEventRow = moneyRows.rows.find(r => r.id === 'cost:k2');
+check('the ledger shows a whole-market cost where it was paid',
+  ledEventRow?.moneyOut, 900);
+check('and marks it as the market’s, not the day’s',
+  ledEventRow?.wholeEvent, true);
+const ledFinance = financeRows({
+  sessions: [ledSession], event: { id: 'mkt', name: 'Winter Market', sessions: [ledSession] },
+  orders: ledOrders, costs: ledCosts, menuItems: [burger, drink], mix: null,
+  now: T + 100 * HOUR,
+});
+check('while Finance holds it out of the day’s costs',
+  ledFinance[0].operatingCosts, 1200);
+check('and reports it as held instead', ledFinance[0].heldEventCosts, 900);
+
+/* --- no clock: a live session is placed by its last order ---------------- */
+// `moneyLedger` takes no `now`, so nothing here rebuilds every five seconds
+// (ADR-009). A live session has no `endedAt` and sits at the last money that
+// actually came in, which is a fact rather than a reading of the clock.
+const liveSession: TradingSession = {
+  id: 'live', name: 'Tonight', status: 'active', startedAt: T,
+  ticketCounter: 1, pausedMs: 0,
+};
+const liveLedger = moneyLedger({
+  orders: [order({ id: 'v1', sessionId: 'live', timestamp: T + 4 * HOUR,
+    items: [line('a', 'Burger', 1, 100, 40)], subtotal: 100, total: 100 })],
+  costs: [], movements: [], stockItems: [], sessions: [liveSession],
+  mix: null, range: ledRange,
+});
+check('a live session sits at its last order', liveLedger.rows[0].at, T + 4 * HOUR);
+// Nothing has come in, so there is nothing to report. A row of zero would say
+// the session took nothing, which is a different claim from not having traded.
+const untradedLedger = moneyLedger({
+  orders: [], costs: [], movements: [], stockItems: [], sessions: [liveSession],
+  mix: null, range: ledRange,
+});
+check('a session that has not traded has no sales row', untradedLedger.rows.length, 0);
+
+/* --- orders outside a session roll up per day, never into one ------------ */
+// Invariant 4: membership is stored, not derived. These orders fall inside
+// `ledSession`'s span and must not be swept into it.
+const looseLedger = moneyLedger({
+  orders: [
+    order({ id: 'w1', timestamp: T + HOUR, items: [line('a', 'B', 1, 100, 40)], subtotal: 100, total: 100 }),
+    order({ id: 'w2', timestamp: T + 2 * HOUR, items: [line('a', 'B', 1, 100, 40)], subtotal: 100, total: 100 }),
+    order({ id: 'w3', timestamp: T + 26 * HOUR, items: [line('a', 'B', 1, 100, 40)], subtotal: 100, total: 100 }),
+  ],
+  costs: [], movements: [], stockItems: [], sessions: [ledSession],
+  mix: null, range: ledRange,
+});
+check('session-less orders group by day, not by ticket', looseLedger.rows.length, 2);
+check('with the day’s takings on one row',
+  looseLedger.rows.map(r => r.moneyIn), [200, 100]);
+check('and none of them invented into the session',
+  looseLedger.rows.some(r => r.sessionId !== undefined), false);
+
+/* --- the range bounds the movements, which carry no session -------------- */
+const narrow = moneyLedger({
+  orders: [], costs: [], movements: ledMovements, stockItems: [ledMince],
+  sessions: [], mix: null, range: { start: T, end: T + 100 * HOUR },
+});
+check('a delivery before the window is not in it',
+  narrow.rows.some(r => r.id === 'mov:m1'), false);
+
+/* --- one definition of a receipt ----------------------------------------- */
+check('a hand-typed delivery is a receipt', isReceipt(mv({ delta: 5 })), true);
+check('so is a packet', isReceipt(mv({ delta: 5, reason: 'packet' })), true);
+check('a correction is not', isReceipt(mv({ delta: 5, reason: 'correction' })), false);
+check('nor is anything going out', isReceipt(mv({ delta: -5 })), false);
+// The three places a price can come from, in order of how directly it was said.
+check('a typed delivery cost wins',
+  receiptValue(mv({ delta: 5, totalCost: 4250, unitCost: 1 }), [ledMince]), 4250);
+check('then the unit cost at the time',
+  receiptValue(mv({ delta: 5, unitCost: 800 }), [ledMince]), 4000);
+check('then what the item costs now',
+  receiptValue(mv({ delta: 5 }), [{ ...ledMince, costPerUnit: 900 }]), 4500);
+check('and otherwise it is not known',
+  receiptValue(mv({ delta: 5 }), [ledMince]), null);
 
 console.log(`\n${failures === 0 ? 'All checks passed.' : `${failures} check(s) FAILED.`}`);
 process.exit(failures === 0 ? 0 : 1);

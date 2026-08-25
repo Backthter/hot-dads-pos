@@ -736,6 +736,32 @@ export function breakEvenByItem(
  * outlay, and both halves of the reversal carry `reversed`, so excluding them
  * needs no pairing and survives a ledger trim.
  */
+export function isReceipt(m: StockMovement): boolean {
+  if (m.delta <= 0) return false;
+  return m.reason === 'added' || m.reason === 'packet';
+}
+
+/**
+ * What one receipt cost, or `null` when nothing on file says.
+ *
+ * Three places to look, in order of how directly they were stated: what the
+ * delivery was typed in as, what one unit was said to cost at the time, and
+ * what the item costs now. A delivery entered with no price at all reaches the
+ * end of that list, and the answer is **not known** rather than nothing —
+ * invariant 2, at the one row where the shop can see it.
+ *
+ * `stockPurchasesValue` reads the unknown as zero, which is what it has always
+ * done and is recorded in `OPEN.md` rather than changed here; the ledger reads
+ * it as a blank and says how many blanks it had.
+ */
+export function receiptValue(m: StockMovement, stockItems: StockItem[]): number | null {
+  if (m.totalCost !== undefined) return m.totalCost;
+  const item = stockItems.find(s => s.id === m.stockItemId);
+  const unit = m.unitCost ?? (item && item.costPerUnit > 0 ? item.costPerUnit : undefined);
+  if (unit === undefined) return null;
+  return unit * m.delta;
+}
+
 export function stockPurchasesValue(
   movements: StockMovement[],
   stockItems: StockItem[],
@@ -745,10 +771,10 @@ export function stockPurchasesValue(
   let total = 0;
   for (const m of effectiveMovements(movements)) {
     if (m.timestamp < from || m.timestamp >= to) continue;
-    if (m.delta <= 0) continue;
-    if (m.reason !== 'added' && m.reason !== 'packet') continue;
-    const unit = m.unitCost ?? stockItems.find(s => s.id === m.stockItemId)?.costPerUnit ?? 0;
-    total += m.totalCost ?? unit * m.delta;
+    if (!isReceipt(m)) continue;
+    // Unchanged from before the predicate was extracted: an unpriced delivery
+    // still totals as zero here. See the note on `receiptValue`.
+    total += receiptValue(m, stockItems) ?? 0;
   }
   return total;
 }
@@ -1193,6 +1219,98 @@ export function resolveCosts(
     revenueRate: costs.byBasis['per-revenue'] / 100,
     averageBasket: totals.orders > 0 ? totals.units / totals.orders : null,
   };
+}
+
+/**
+ * How a rate became rupees, kept as numbers rather than as a sentence.
+ *
+ * The engine does no formatting (see the note at the top of this file), so the
+ * ledger row that reads *"18% of Rs 22,180 taken"* is assembled where it is
+ * drawn. Keeping the parts apart also makes the derivation checkable
+ * arithmetically instead of by string comparison, which matters because the
+ * defect this guards against — showing `entry.amount` as though it were money —
+ * is invisible in a sentence and obvious in a number.
+ */
+export interface EntryCharge {
+  /** The rate as typed: rupees per ticket or unit, or percentage points. */
+  rate: number;
+  /** What it was charged against: tickets, units, or rupees of net revenue. */
+  base: number;
+  /**
+   * Units the cost actually reached, when it names particular items (ADR-022).
+   * Null when it names none, where `base` is already the answer.
+   */
+  covered: number | null;
+}
+
+/**
+ * One cost entry, as money for one period.
+ *
+ * **`CostEntry.amount` is not rupees on three of the five bases** — it is a
+ * rate per ticket, a rate per unit, or percentage points — and it is the only
+ * field in the app whose unit depends on another field. Convention 4 says
+ * amounts are comparable only within their basis; the practical form of that
+ * rule is *never put `amount` in a money column*, because `18` for a commission
+ * that cost Rs 640 is a plausible number that is not money.
+ *
+ * This is the one place an entry becomes rupees. It exists so that the ledger
+ * and `resolveCosts` cannot drift apart on how a rate is spread — which is
+ * exactly how `foodCost` and `stockPurchasesValue` came to disagree about one
+ * delivery (ADR-014). `metrics.check.ts` asserts the identity in both
+ * directions.
+ *
+ * `mix` of `null` charges a targeted cost against every unit, matching
+ * `resolveCosts`: the pessimistic reading, because the flattering one would be
+ * produced automatically on data nobody looked at.
+ */
+export function resolveEntryAmount(
+  entry: CostEntry,
+  totals: Totals,
+  mix: SalesMixEntry[] | null,
+): { amount: number; charge: EntryCharge | null } {
+  // The mix's own count where there is one, because that is what `resolveCosts`
+  // blends against and the two figures must divide by the same denominator.
+  // `itemPerformance` credits a deal's components, so the two can differ.
+  const totalUnits = mix === null
+    ? totals.units
+    : mix.reduce((sum, e) => sum + e.units, 0);
+
+  switch (entry.basis) {
+    // Paid once, in rupees, for a thing that happened. Nothing to resolve —
+    // this is the shape most costs a stall logs actually have.
+    case 'per-session':
+    case 'per-event':
+      return { amount: entry.amount, charge: null };
+
+    case 'per-order':
+      return {
+        amount: entry.amount * totals.orders,
+        charge: { rate: entry.amount, base: totals.orders, covered: null },
+      };
+
+    case 'per-revenue':
+      return {
+        amount: (entry.amount / 100) * totals.netRevenue,
+        charge: { rate: entry.amount, base: totals.netRevenue, covered: null },
+      };
+
+    case 'per-unit': {
+      if (!entry.appliesTo || mix === null) {
+        return {
+          amount: entry.amount * totalUnits,
+          charge: { rate: entry.amount, base: totalUnits, covered: null },
+        };
+      }
+      let covered = 0;
+      for (const line of mix) {
+        if (targetCovers(entry.appliesTo, line)) covered += line.units;
+      }
+      return {
+        amount: entry.amount * covered,
+        charge: { rate: entry.amount, base: totalUnits, covered },
+      };
+    }
+  }
 }
 
 /**
@@ -1727,6 +1845,231 @@ export function financeRows(input: {
   // session's elapsed hours — does not have to change every call site.
   void now;
   return rows;
+}
+
+/* ------------------------------------------------------------ money ledger */
+
+export type MoneyRowKind = 'purchase' | 'cost' | 'sales';
+
+/**
+ * One line in the money ledger.
+ *
+ * `moneyIn` and `moneyOut` are both nullable and never both set. Null is *not
+ * known*, which on this table means a delivery that was entered with no price;
+ * zero would be a claim that it was free.
+ */
+export interface MoneyRow {
+  id: string;
+  at: number;
+  kind: MoneyRowKind;
+  /** What the row is, in the shop's words. No figures — those are columns. */
+  label: string;
+  /** Set on a cost row, so the row can say what kind of cost it was. */
+  basis?: CostBasis;
+  moneyIn: number | null;
+  /** Always rupees. Never `CostEntry.amount` on a rate basis — see `resolveEntryAmount`. */
+  moneyOut: number | null;
+  /** How a rate became rupees. Null on a flat fee and on everything else. */
+  charge: EntryCharge | null;
+  /**
+   * The balance after this row, over the rows the ledger was built from.
+   *
+   * Rows with no amount are skipped rather than guessed at, which makes this a
+   * floor whenever `unpriced` is non-zero.
+   */
+  running: number;
+  /** A cost paid for a whole event rather than a day's trading (ADR-013). */
+  wholeEvent?: boolean;
+  sessionId?: string;
+  eventId?: string;
+  stockItemId?: string;
+  costEntryId?: string;
+}
+
+export interface MoneyLedgerResult {
+  /** Oldest first — a running balance reads downward. */
+  rows: MoneyRow[];
+  /** Rows with no amount on file, which make `running` a lower bound. */
+  unpriced: number;
+  moneyIn: number;
+  moneyOut: number;
+  /** What came in, split by how it was taken. Sales rows only. */
+  cash: number;
+  transfer: number;
+}
+
+/**
+ * Where the money went, in the order it went there.
+ *
+ * The outlay half of the split the costs explainer teaches: Finance answers
+ * *did this pay* by measuring consumption, and this answers *what left the
+ * till* by measuring cash. Both are right and they do not agree, which is the
+ * point of having written the explainer.
+ *
+ * Three sources, three shapes, one column:
+ *
+ *  - **Purchases** — one row per receipt, `added` and `packet` only, which is
+ *    ADR-014's definition and `isReceipt` is the only copy of it. Effective
+ *    rows only (ADR-017): an undone delivery is not an outlay, and both halves
+ *    of the pair carry `reversed`, so no pairing logic is needed and a ledger
+ *    trim cannot orphan one into visibility.
+ *  - **Costs** — one row per entry, at the moment it was logged, resolved to
+ *    rupees by `resolveEntryAmount`.
+ *  - **Sales** — one row per session, not per ticket. Four hundred rows for
+ *    one Saturday is the order log again, and History already has that.
+ *
+ * **A per-event cost is shown where it was paid.** This is the one place the
+ * ledger parts company with the Finance table on purpose. ADR-013 holds a
+ * market's pitch fee out of a single session's profit, because charging one
+ * afternoon for it is a claim about that afternoon's economics. The money still
+ * left the till on a date, and a cash ledger that hid it would be answering a
+ * question it is not titled with. Shown, at its timestamp, marked `wholeEvent`.
+ * See ADR-025.
+ *
+ * **No `now`.** A live session's sales row sits at its last order rather than
+ * at the current time — a real fact that does not move, instead of one that
+ * rebuilds this whole table every five seconds and undoes ADR-009. A session
+ * with no orders yet has no sales row, which is correct: nothing has come in.
+ */
+export function moneyLedger(input: {
+  /** Every order in view, including those belonging to no session. */
+  orders: Order[];
+  /** Every cost entry in view. */
+  costs: CostEntry[];
+  movements: StockMovement[];
+  stockItems: StockItem[];
+  /** The sessions to roll sales up under. */
+  sessions: TradingSession[];
+  /** The period's sales mix, for spreading a targeted per-unit cost. */
+  mix: SalesMixEntry[] | null;
+  /** Bounds the movements considered, since they carry no session. */
+  range: DateRange;
+}): MoneyLedgerResult {
+  const { orders, costs, movements, stockItems, sessions, mix, range } = input;
+  const rows: MoneyRow[] = [];
+
+  // The whole period's figures, because that is what a rate is charged
+  // against. Computed here rather than taken as an argument so it cannot be
+  // passed a `Totals` from a different set of orders than the sales rows use.
+  const totals = totalsFor(orders);
+
+  /* ---- what left the till for stock */
+
+  for (const m of effectiveMovements(movements)) {
+    if (m.timestamp < range.start || m.timestamp >= range.end) continue;
+    if (!isReceipt(m)) continue;
+    const item = stockItems.find(s => s.id === m.stockItemId);
+    rows.push({
+      id: `mov:${m.id}`,
+      at: m.timestamp,
+      kind: 'purchase',
+      label: item ? `${item.name} — ${m.delta} ${item.unit}` : 'Stock received',
+      moneyIn: null,
+      moneyOut: receiptValue(m, stockItems),
+      charge: null,
+      running: 0,
+      stockItemId: m.stockItemId,
+    });
+  }
+
+  /* ---- what you logged yourself */
+
+  for (const entry of costs) {
+    const { amount, charge } = resolveEntryAmount(entry, totals, mix);
+    rows.push({
+      id: `cost:${entry.id}`,
+      at: entry.timestamp,
+      kind: 'cost',
+      label: entry.note || 'Cost',
+      basis: entry.basis,
+      moneyIn: null,
+      moneyOut: amount,
+      charge,
+      running: 0,
+      ...(entry.basis === 'per-event' ? { wholeEvent: true } : {}),
+      ...(entry.sessionId ? { sessionId: entry.sessionId } : {}),
+      ...(entry.eventId ? { eventId: entry.eventId } : {}),
+      costEntryId: entry.id,
+    });
+  }
+
+  /* ---- what came in */
+
+  let cash = 0;
+  let transfer = 0;
+
+  for (const session of sessions) {
+    const taken = ordersForSession(orders, session.id);
+    if (taken.length === 0) continue;
+    const t = totalsFor(taken);
+    // A live session has no `endedAt`. Its last order is when money last came
+    // in, is a fact rather than a reading of the clock, and still sorts the row
+    // after everything that has happened.
+    const last = taken.reduce((latest, o) => Math.max(latest, o.timestamp), 0);
+    cash += t.cash;
+    transfer += t.transfer;
+    rows.push({
+      id: `ses:${session.id}`,
+      at: session.endedAt ?? last,
+      kind: 'sales',
+      label: `${session.name} — ${t.orders} ${t.orders === 1 ? 'order' : 'orders'}`,
+      moneyIn: t.collected,
+      moneyOut: null,
+      charge: null,
+      running: 0,
+      sessionId: session.id,
+    });
+  }
+
+  /*
+   * Orders taken outside any session roll up per calendar day.
+   *
+   * They are never guessed into a session by timestamp — invariant 4 — so a day
+   * is the only grouping available that is not an invention. Local days, since
+   * a trading day is a thing that happens where the stall is standing.
+   */
+  const loose = orders.filter(o => o.sessionId === undefined && !o.voidedAt);
+  const byDay = new Map<string, Order[]>();
+  for (const order of loose) {
+    const d = new Date(order.timestamp);
+    const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    const bucket = byDay.get(key);
+    if (bucket) bucket.push(order); else byDay.set(key, [order]);
+  }
+  for (const [key, taken] of byDay) {
+    const t = totalsFor(taken);
+    const last = taken.reduce((latest, o) => Math.max(latest, o.timestamp), 0);
+    cash += t.cash;
+    transfer += t.transfer;
+    rows.push({
+      id: `day:${key}`,
+      at: last,
+      kind: 'sales',
+      label: `Outside a session — ${t.orders} ${t.orders === 1 ? 'order' : 'orders'}`,
+      moneyIn: t.collected,
+      moneyOut: null,
+      charge: null,
+      running: 0,
+    });
+  }
+
+  /* ---- in order, with the balance accumulated down the column */
+
+  rows.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
+
+  let running = 0;
+  let unpriced = 0;
+  let moneyIn = 0;
+  let moneyOut = 0;
+  for (const row of rows) {
+    if (row.moneyIn === null && row.moneyOut === null) unpriced += 1;
+    moneyIn += row.moneyIn ?? 0;
+    moneyOut += row.moneyOut ?? 0;
+    running += (row.moneyIn ?? 0) - (row.moneyOut ?? 0);
+    row.running = running;
+  }
+
+  return { rows, unpriced, moneyIn, moneyOut, cash, transfer };
 }
 
 /* ------------------------------------------------------------ void rate */
