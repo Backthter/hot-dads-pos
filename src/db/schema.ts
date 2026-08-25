@@ -134,6 +134,19 @@ export const costEntries = sqliteTable("cost_entries", {
    * change a historical figure.
    */
   basis: text("basis").notNull().default("per-session"),
+  /**
+   * Which menu items a `per-unit` cost is charged against, as JSON. Null means
+   * every item, which is what every row written before Phase 1C-ii-b means.
+   *
+   * Added in Phase 1C-ii-b (ADR-022). One JSON column rather than a kind column
+   * and an ids column, which would each be null on the other's rows — the shape
+   * ADR-012 rejected for the amount, for invariant 2's reason.
+   *
+   * Nullable with no default, and only ever written on a `per-unit` row. A
+   * target on any other basis names nothing the amount is divided by, so it is
+   * refused at the write sites and dropped on load.
+   */
+  appliesTo: text("applies_to"),
   timestamp: integer("timestamp").notNull(),
 });
 

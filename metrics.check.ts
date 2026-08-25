@@ -17,7 +17,7 @@ import {
   targetAfterBasisChange, ungroupedSessions,
 } from './src/app/lib/sessions';
 import {
-  COST_ENTRY_COLUMNS, costEntryFromRow, costEntryToRow,
+  COST_ENTRY_COLUMNS, costEntryFromRow, costEntryToRow, parseCostAppliesTo,
 } from './src/db/costEntryRows';
 import {
   TRADING_EVENT_COLUMNS, tradingEventFromRow, tradingEventToRow,
@@ -345,6 +345,72 @@ check('an eventless per-event row is demoted', eventless.basis, 'per-session');
 check('per-event without an event is incoherent',
   costEntryIsCoherent({ ...eventCost, eventId: undefined }), false);
 check('and with one it is fine', costEntryIsCoherent(eventCost), true);
+
+/* ------------------------------------ a per-unit cost that names its items */
+// ADR-022. Both shapes go through the same column, so both are checked whole
+// as well as field by field — a column added to one side of the mapping and not
+// the other is the exact failure `eventId` had for a whole phase.
+console.log('\nCost target round trip');
+
+const boxCost = cost({
+  id: 'c-box', amount: 12, note: 'burger boxes', basis: 'per-unit',
+  appliesTo: { kind: 'items', ids: ['burger', 'cheeseburger'] },
+});
+const boxBack = costEntryFromRow(
+  Object.fromEntries(columns.map((name, i) => [name, costEntryToRow(boxCost)[i]])),
+);
+check('an items target survives the round trip', boxBack.appliesTo, { kind: 'items', ids: ['burger', 'cheeseburger'] });
+check('with its basis', boxBack.basis, 'per-unit');
+check('and the whole entry is unchanged', sortKeys(boxBack), sortKeys(boxCost));
+
+const catCost = cost({
+  id: 'c-cat', amount: 3, note: 'lids', basis: 'per-unit',
+  appliesTo: { kind: 'category', id: 'cat-drinks' },
+});
+const catBack = costEntryFromRow(
+  Object.fromEntries(columns.map((name, i) => [name, costEntryToRow(catCost)[i]])),
+);
+check('a category target survives the round trip', catBack.appliesTo, { kind: 'category', id: 'cat-drinks' });
+check('and the whole entry is unchanged', sortKeys(catBack), sortKeys(catCost));
+
+// Absent means every item and is the only reading that cannot silently shrink a
+// figure. An empty id list is a different claim — these items, of which there
+// are none — and is preserved rather than normalised into absence.
+const untargeted = cost({ id: 'c-all', amount: 5, note: 'napkins', basis: 'per-unit' });
+const untargetedBack = costEntryFromRow(
+  Object.fromEntries(columns.map((name, i) => [name, costEntryToRow(untargeted)[i]])),
+);
+check('no target stays absent', untargetedBack.appliesTo, undefined);
+const emptyIds = cost({
+  id: 'c-none', amount: 5, note: 'nothing', basis: 'per-unit',
+  appliesTo: { kind: 'items', ids: [] },
+});
+const emptyBack = costEntryFromRow(
+  Object.fromEntries(columns.map((name, i) => [name, costEntryToRow(emptyIds)[i]])),
+);
+check('an empty id list is not absence', emptyBack.appliesTo, { kind: 'items', ids: [] });
+
+// A target only means something on per-unit. The write side refuses it; the
+// load path drops it, because a shop with one malformed row still has to open.
+for (const basis of ['per-session', 'per-event', 'per-order', 'per-revenue'] as CostBasis[]) {
+  check(`${basis} with a target is incoherent`, costEntryIsCoherent(cost({
+    id: 'c-bad', basis, amount: 10,
+    eventId: basis === 'per-event' ? 'evt-1' : undefined,
+    appliesTo: { kind: 'items', ids: ['burger'] },
+  })), false);
+}
+check('per-unit with a target is fine', costEntryIsCoherent(boxCost), true);
+const demoted = costEntryFromRow({
+  id: 'c-demote', session_id: null, event_id: null, amount: 10, note: 'bags',
+  kind: '', basis: 'per-order', applies_to: '{"kind":"items","ids":["burger"]}', timestamp: T,
+});
+check('the load path drops it rather than throwing', demoted.appliesTo, undefined);
+check('and keeps the basis it was filed under', demoted.basis, 'per-order');
+// Rows an older build wrote, and rows a newer one did. Everything unreadable
+// reads as absent, which means every item — never as a target of nothing.
+check('unparseable JSON reads as absent', parseCostAppliesTo('{not json'), undefined);
+check('an unknown kind reads as absent', parseCostAppliesTo('{"kind":"supplier","id":"x"}'), undefined);
+check('a null column reads as absent', parseCostAppliesTo(null), undefined);
 
 /* ------------------------------------------------------------- void rate */
 // Three live orders worth 1000 and one voided worth 200.

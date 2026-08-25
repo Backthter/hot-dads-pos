@@ -420,17 +420,38 @@ export function costsFiledAgainstEvent(costs: CostEntry[], eventId: string): Cos
  * has to stay openable; `costEntryFromRow` demotes instead.
  */
 export function costEntryIsCoherent(entry: CostEntry): boolean {
-  return entry.basis !== 'per-event' || Boolean(entry.eventId);
+  return costEntryIncoherence(entry) === null;
+}
+
+/**
+ * Why an entry is incoherent, or `null` when it is fine.
+ *
+ * Two rules, both about a field that means nothing where it sits:
+ *
+ *  - `per-event` requires an `eventId`, for the reasons above.
+ *  - `appliesTo` requires `per-unit`. A cost charged once for a service, or per
+ *    ticket, or as a share of sales, has no item to be charged against — the
+ *    denominator is the period, the ticket or the rupee, not the thing sold.
+ *    Storing a target on one would read as a filter that is silently ignored by
+ *    every figure, which is worse than refusing it (ADR-022).
+ */
+function costEntryIncoherence(entry: CostEntry): string | null {
+  if (entry.basis === 'per-event' && !entry.eventId) {
+    return `Cost ${entry.id} is filed per-event with no event. A per-event cost is paid once `
+      + 'for the whole event, so without one it belongs to nothing and appears in no figure.';
+  }
+  if (entry.appliesTo && entry.basis !== 'per-unit') {
+    return `Cost ${entry.id} is filed ${entry.basis} and targets menu items. Only a per-unit `
+      + 'cost is charged against what was sold; on any other basis the target names nothing '
+      + 'the amount is divided by, and every figure would ignore it silently.';
+  }
+  return null;
 }
 
 /** Throws on an incoherent entry. Returns it unchanged so it can wrap a write. */
 export function assertCostEntry(entry: CostEntry): CostEntry {
-  if (!costEntryIsCoherent(entry)) {
-    throw new Error(
-      `Cost ${entry.id} is filed per-event with no event. A per-event cost is paid once `
-      + 'for the whole event, so without one it belongs to nothing and appears in no figure.',
-    );
-  }
+  const wrong = costEntryIncoherence(entry);
+  if (wrong) throw new Error(wrong);
   return entry;
 }
 

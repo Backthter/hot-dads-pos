@@ -265,6 +265,28 @@ export type CostBasis =
   | 'per-revenue';  // a true percentage: delivery commission, card fees
 
 /**
+ * Which menu items a `per-unit` cost is charged against (ADR-022).
+ *
+ * A category is stored by **id**, not by name, even though `MenuItem.category`
+ * holds a name — the two are joined through `Category.name` at the moment the
+ * cost is resolved. Storing the name here instead would look tidier and would
+ * break silently: renaming a category rewrites `MenuItem.category` on every
+ * item (`useMenu.renameCategory`) and would not rewrite this, so the cost would
+ * quietly stop matching anything and the items it paid for would get cheaper
+ * overnight with nothing on screen to say why.
+ *
+ * Resolution is against the item's category **now**, not the one it was in when
+ * the cost was logged. That is deliberate: this is a standing rule the shop
+ * typed — *boxes are a burger cost* — and moving an item into Burgers is a
+ * statement that it now takes a box. It is not a frozen sale figure, so
+ * invariant 3 does not govern it; what invariant 3 protects is
+ * `CartItem.unitCost`, which this never touches.
+ */
+export type CostAppliesTo =
+  | { kind: 'items'; ids: string[] }
+  | { kind: 'category'; id: string };
+
+/**
  * A cost the POS cannot observe: stall fee, staff, fuel, packaging.
  *
  * Ingredient cost comes from the stock ledger and needs no typing. Everything
@@ -317,6 +339,23 @@ export interface CostEntry {
    * `assertCostEntry` (`src/app/lib/sessions.ts`).
    */
   basis: CostBasis;
+  /**
+   * Which menu items this cost is charged against. Absent means all of them.
+   *
+   * **Only meaningful for `per-unit`** — a period cost has no item to attach
+   * to, and the other three rate bases were considered and rejected (ADR-022).
+   * `assertCostEntry` refuses it on any other basis at the write sites; the
+   * load path drops it instead of throwing, the same way a per-event cost with
+   * no event is demoted rather than fatal.
+   *
+   * Absent is not the same as `{ kind: 'items', ids: [] }`. Absent means "every
+   * item", which is what a cost with no target has always meant; an empty list
+   * means "these items, of which there are none", and resolves to nothing. That
+   * is invariant 2's distinction — the flattering reading of a missing value is
+   * the one that must not happen by default — so nothing here ever defaults an
+   * absent target to an empty one.
+   */
+  appliesTo?: CostAppliesTo;
   /**
    * @deprecated The pre-Phase-1A fixed/variable model (ADR-012).
    *

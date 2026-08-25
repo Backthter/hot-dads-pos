@@ -1,4 +1,4 @@
-import type { CostBasis, CostEntry, CostKind } from '../app/types';
+import type { CostAppliesTo, CostBasis, CostEntry, CostKind } from '../app/types';
 
 /**
  * The translation between a `cost_entries` row and a `CostEntry`, on its own.
@@ -40,9 +40,47 @@ export function parseCostKind(raw: unknown): CostKind | undefined {
   return undefined;
 }
 
+/**
+ * Reads the stored target, or `undefined` for anything that is not one.
+ *
+ * Stored as JSON in one nullable column rather than as two — a kind column and
+ * an ids column would be null on each other's rows, which is the every-row-has-
+ * a-hole shape ADR-012 rejected for the amount and invariant 2 is about.
+ *
+ * Everything unrecognised reads as absent, and absent means "every item", which
+ * is what a cost with no target has always meant and is the reading that cannot
+ * silently shrink a figure. An older build writes rows this one has to read and
+ * sync merges them both ways, so unknown is a real case and not a flourish.
+ * An empty `ids` array is *not* absent — it resolves to nothing, deliberately —
+ * so it is preserved rather than normalised away.
+ */
+export function parseCostAppliesTo(raw: unknown): CostAppliesTo | undefined {
+  if (typeof raw !== 'string' || raw === '') return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  const value = parsed as { kind?: unknown; ids?: unknown; id?: unknown };
+  if (value.kind === 'items' && Array.isArray(value.ids)) {
+    return { kind: 'items', ids: value.ids.filter(id => typeof id === 'string') as string[] };
+  }
+  if (value.kind === 'category' && typeof value.id === 'string' && value.id !== '') {
+    return { kind: 'category', id: value.id };
+  }
+  return undefined;
+}
+
 export function costEntryFromRow(r: Record<string, unknown>): CostEntry {
   const eventId = r.event_id ? String(r.event_id) : undefined;
   const basis = parseCostBasis(r.basis);
+  // A target only means anything on per-unit — on any other basis the amount is
+  // divided by the period, the ticket or the rupee, and there is no item for it
+  // to name (ADR-022). Dropped rather than fatal, for the same reason the
+  // per-event demotion below is: loading must not throw.
+  const appliesTo = basis === 'per-unit' ? parseCostAppliesTo(r.applies_to) : undefined;
   return {
     id: String(r.id ?? ''),
     sessionId: r.session_id ? String(r.session_id) : undefined,
@@ -56,6 +94,7 @@ export function costEntryFromRow(r: Record<string, unknown>): CostEntry {
     // the migration, which at least keeps it in the dated figures where it can
     // be seen and re-filed. Writes assert instead; see `assertCostEntry`.
     basis: basis === 'per-event' && !eventId ? 'per-session' : basis,
+    ...(appliesTo ? { appliesTo } : {}),
     kind: parseCostKind(r.kind),
     timestamp: Number(r.timestamp ?? 0),
   };
@@ -74,7 +113,7 @@ export function costEntryFromRow(r: Record<string, unknown>): CostEntry {
  * from one written before it.
  */
 export const COST_ENTRY_COLUMNS = [
-  'id', 'session_id', 'event_id', 'amount', 'note', 'kind', 'basis', 'timestamp',
+  'id', 'session_id', 'event_id', 'amount', 'note', 'kind', 'basis', 'applies_to', 'timestamp',
 ] as const;
 
 export function costEntryToRow(c: CostEntry): (string | number | null)[] {
@@ -86,6 +125,9 @@ export function costEntryToRow(c: CostEntry): (string | number | null)[] {
     c.note,
     c.kind ?? '',
     c.basis,
+    // Only written where it means something, so a row that was demoted on the
+    // way in does not acquire a target on the way back out.
+    c.appliesTo && c.basis === 'per-unit' ? JSON.stringify(c.appliesTo) : null,
     c.timestamp,
   ];
 }

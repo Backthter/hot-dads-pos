@@ -242,6 +242,15 @@ fn run_migrations(db_path: &PathBuf) {
         "TEXT NOT NULL DEFAULT 'per-session'",
     );
 
+    // A per-unit cost may be charged against particular menu items or a category
+    // rather than against everything sold (ADR-022): a burger box is a burger
+    // cost, and charging it to drinks understates drink margin and overstates
+    // burger margin in the same breath.
+    //
+    // JSON in one nullable column. Null means every item, which is what every
+    // row written before this phase means, so there is nothing to backfill.
+    add_column_if_missing(&conn, "cost_entries", "applies_to", "TEXT");
+
     // An event may now exist before its sessions do (ADR-020), so it needs
     // somewhere to say when it is *meant* to run and where. These are a plan and
     // never the record: what an event actually spanned still comes from its
