@@ -5,11 +5,22 @@ import { ACCENT, Panel, money } from './AnalyticsUI';
 import { Button, Select, TextInput, alpha } from '../ui';
 import { costSummary } from './metrics';
 import {
-  COST_BASIS_LABEL, COST_BASIS_UNIT, describeCostAmount, needsRefiling,
-  targetAfterBasisChange,
+  COST_BASIS_LABEL, COST_BASIS_UNIT, allEvents, describeCostAmount, describeCostItems,
+  describeCostTarget, needsRefiling, targetAfterBasisChange, ungroupedSessions,
 } from '../lib/sessions';
+import type { EventListing } from '../lib/sessions';
 import type { PerEventAvailability } from './scope';
-import type { CostBasis, CostEntry, TradingEvent, TradingSession } from '../types';
+import type {
+  Category, CostAppliesTo, CostBasis, CostEntry, MenuItem, TradingEvent, TradingSession,
+} from '../types';
+
+/** `14–16 Aug`, or a single day. The span an event actually ran. */
+function spanWords(start: number, end?: number): string {
+  const day = (ms: number) =>
+    new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  if (end === undefined) return `from ${day(start)}`;
+  return day(start) === day(end) ? day(start) : `${day(start)}–${day(end)}`;
+}
 
 /** The five bases, in the order the form offers them: flat first, then rates. */
 const BASES: CostBasis[] = ['per-session', 'per-event', 'per-order', 'per-unit', 'per-revenue'];
@@ -42,16 +53,34 @@ const BASIS_HINT: Record<CostBasis, string> = {
  * ledger with gaps in it is worse than none — it looks complete.
  */
 export function CostsPanel({
-  costs, sessions, events, onAdd, onRefile, onDelete, scopeLabel, scopedCosts,
-  noticeDismissed, onDismissNotice, perEvent,
+  costs, sessions, events, menuItems, menuCategories, onAdd, onRefile, onDelete, onMakeEvent,
+  scopeLabel, scopedCosts, noticeDismissed, onDismissNotice, perEvent,
 }: {
   costs: CostEntry[];
   sessions: TradingSession[];
   events: TradingEvent[];
-  onAdd: (amount: number, note: string, basis: CostBasis, target?: { sessionId?: string; eventId?: string }) => void;
+  /** The menu, for choosing what a `per-unit` cost is charged against. */
+  menuItems: MenuItem[];
+  menuCategories: Category[];
+  onAdd: (
+    amount: number,
+    note: string,
+    basis: CostBasis,
+    target?: { sessionId?: string; eventId?: string },
+    appliesTo?: CostAppliesTo,
+  ) => void;
   /** Changes what a cost is charged per, leaving the amount exactly as typed. */
   onRefile: (id: string, basis: CostBasis) => void;
   onDelete: (id: string) => void;
+  /**
+   * Makes an event of one containing this session, so a cost can belong to the
+   * market rather than to the day.
+   *
+   * Called from a press and never from a code path. ADR-018 rejects the program
+   * creating an event so a basis stops being disabled; what makes this
+   * legitimate is that a person pressed a button saying what it would do.
+   */
+  onMakeEvent: (sessionId: string) => void;
   scopeLabel: string;
   scopedCosts: CostEntry[];
   /** Whether the shop has already dealt with the fixed/variable migration. */
@@ -71,6 +100,15 @@ export function CostsPanel({
   const [error, setError] = useState('');
   /** Empty means "whatever is trading now", which is the usual case. */
   const [target, setTarget] = useState('');
+  /**
+   * What a `per-unit` cost is charged against (ADR-022). Empty means every
+   * item, which is what every cost meant before this existed.
+   *
+   * Held as one combined string like the target, for the same reason: one
+   * select, one value, and no way for a kind and an id to disagree.
+   * `items:<id>` or `category:<id>`.
+   */
+  const [charge, setCharge] = useState('');
   /**
    * Migrated entries the shop has just re-filed, so they leave the list as they
    * are dealt with. Deliberately not persisted: what is on disk is the basis
@@ -97,27 +135,81 @@ export function CostsPanel({
   const eventNames = useMemo(() => new Map(events.map(e => [e.id, e.name])), [events]);
 
   /**
+   * Every event, with its status and what it actually spanned.
+   *
+   * `allEvents` rather than the raw `events` prop, which is what this read
+   * before: the membership is the same — a session-less event is still
+   * offerable, and has to be, because the pitch fee is paid on Saturday morning
+   * before Sunday exists (ADR-021) — but the raw list carries only a name, so
+   * the picker could not say whether an event had traded or when.
+   *
+   * Note this is deliberately *not* `eventGroups`, which `ScopePicker` uses.
+   * That one drops session-less events because there is nothing to report on a
+   * period that has not traded; this one keeps them because a plan is a
+   * perfectly good thing to file a cost against. The two lists differ on
+   * purpose — see `docs/01-DOMAIN.md`.
+   */
+  const listings = useMemo(() => allEvents(events, sessions), [events, sessions]);
+  const loose = useMemo(() => ungroupedSessions(events, sessions), [events, sessions]);
+
+  const describeListing = (l: EventListing) => {
+    const span = l.span ? spanWords(l.span.start, l.span.end) : null;
+    if (l.sessions.length === 0) return 'Planned · no sessions yet';
+    const count = `${l.sessions.length} session${l.sessions.length === 1 ? '' : 's'}`;
+    return `${count}${span ? ` · ${span}` : ''}${l.status === 'active' ? ' · running' : ''}`;
+  };
+
+  /**
    * Where a cost can be filed.
    *
    * Events come first because they are the reason this exists: a pitch fee for
    * a three-day market is paid once, for the market, and filing it against one
    * of the three days is a choice with no right answer.
    *
-   * A per-event cost can only be filed against an event, so the sessions drop
-   * out of the list entirely rather than being offered and then refused.
+   * The list is hierarchical, matching `ScopePicker`, so an event shows what it
+   * contains rather than sitting in a flat list beside its own days.
+   *
+   * **On truncation.** This used to offer the last twelve sessions, newest
+   * first, which under a hierarchy reads wrongly: day four of a market could
+   * fall outside the window while days one to three were shown, so a shop would
+   * see "Winter Market, 3 sessions" above a market that ran four. An event's
+   * own sessions are the thing the hierarchy exists to show, so they are never
+   * truncated — every session of a listed event is listed. The bound moved to
+   * the two lists that have no containment to break: twelve events, and twelve
+   * sessions belonging to none.
+   *
+   * A per-event cost can only be filed against an event, so under that basis
+   * the sessions drop out entirely rather than being offered and then refused.
+   * The events keep their detail line, so what a market contains is still
+   * legible without the rows being selectable.
    */
-  const eventTargets = useMemo(
-    () => events.map(e => ({ value: `event:${e.id}`, label: e.name, detail: 'Whole event' })),
-    [events]);
-  const targets = useMemo(() => (basis === 'per-event'
-    ? [{ value: '', label: 'Pick an event' }, ...eventTargets]
-    : [
+  const targets = useMemo(() => {
+    const shownEvents = listings.slice(0, 12);
+    if (basis === 'per-event') {
+      return [
+        { value: '', label: 'Pick an event' },
+        ...shownEvents.map(l => ({
+          value: `event:${l.event.id}`, label: l.event.name, detail: describeListing(l),
+        })),
+      ];
+    }
+    return [
       { value: '', label: live ? `${live.name} (trading now)` : 'No session — dated only' },
-      ...eventTargets,
-      ...[...sessions].reverse().slice(0, 12).map(s => ({
-        value: `session:${s.id}`, label: s.name, detail: 'One session',
+      ...shownEvents.flatMap(l => [
+        {
+          value: `event:${l.event.id}`, label: l.event.name,
+          detail: `Whole event · ${describeListing(l)}`,
+        },
+        ...l.sessions.map(session => ({
+          value: `session:${session.id}`, label: session.name,
+          detail: 'One session', depth: 1,
+        })),
+      ]),
+      ...loose.slice(0, 12).map(session => ({
+        value: `session:${session.id}`, label: session.name, detail: 'Not in an event',
       })),
-    ]), [basis, eventTargets, sessions, live]);
+    ];
+  }, [basis, listings, loose, live]);
   const scoped = useMemo(() => costSummary(scopedCosts), [scopedCosts]);
   const history = useMemo(() => [...costs].sort((a, b) => b.timestamp - a.timestamp), [costs]);
 
@@ -130,6 +222,74 @@ export function CostsPanel({
     [history, noticeDismissed, justRefiled]);
 
   const unit = COST_BASIS_UNIT[basis];
+
+  /* ---------------------------------- what a per-unit cost is charged against */
+
+  /**
+   * The item and category options, categories first.
+   *
+   * A category is offered by **id** while the menu stores an item's category by
+   * name — the join happens here and in `salesMix`, and nowhere else. Storing
+   * the name instead would break on a rename: every item's category is
+   * rewritten and the cost's target is not, so it would quietly stop matching.
+   */
+  const chargeOptions = useMemo(() => [
+    { value: '', label: 'Every item sold' },
+    ...menuCategories.map(c => ({
+      value: `category:${c.id}`, label: c.name, detail: 'Everything in this category',
+    })),
+    ...menuItems.map(m => ({
+      value: `items:${m.id}`, label: m.name, detail: m.category, depth: 1,
+    })),
+  ], [menuCategories, menuItems]);
+
+  /** The state above, as the field that is stored. Undefined means every item. */
+  const appliesTo = useMemo((): CostAppliesTo | undefined => {
+    if (basis !== 'per-unit' || !charge) return undefined;
+    const [kind, id] = charge.split(':');
+    if (kind === 'category') return { kind: 'category', id };
+    if (kind === 'items') return { kind: 'items', ids: [id] };
+    return undefined;
+  }, [basis, charge]);
+
+  /* ------------------------------------------ what this is about to be filed as */
+
+  /**
+   * The attachment, stated under the basis rather than left to a dropdown
+   * value. `Whole event` and `Winter Market` are both true, and neither says
+   * that the amount is paid once for three days of trading.
+   */
+  const attachment = useMemo(() => {
+    const [kindOfTarget, id] = target.split(':');
+    const listing = kindOfTarget === 'event' ? listings.find(l => l.event.id === id) : undefined;
+    const session = kindOfTarget === 'session'
+      ? sessions.find(sn => sn.id === id)
+      : (kindOfTarget === 'event' ? undefined : live);
+    return describeCostTarget({
+      basis,
+      ...(listing ? {
+        event: {
+          name: listing.event.name,
+          sessionCount: listing.sessions.length,
+          ...(listing.span ? { span: spanWords(listing.span.start, listing.span.end) } : {}),
+        },
+      } : {}),
+      ...(session ? { session: { name: session.name } } : {}),
+    });
+  }, [basis, target, listings, sessions, live]);
+
+  /** The same sentence for the items, when the basis is the one that has them. */
+  const itemAttachment = useMemo(() => {
+    if (basis !== 'per-unit') return null;
+    return describeCostItems(appliesTo, {
+      items: appliesTo?.kind === 'items'
+        ? appliesTo.ids.map(id => menuItems.find(m => m.id === id)?.name ?? 'an item that is gone')
+        : [],
+      ...(appliesTo?.kind === 'category'
+        ? { category: menuCategories.find(c => c.id === appliesTo.id)?.name }
+        : {}),
+    });
+  }, [basis, appliesTo, menuItems, menuCategories]);
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -147,9 +307,14 @@ export function CostsPanel({
       setError('Pick the event this was paid for');
       return;
     }
-    onAdd(value, note, basis, id
-      ? (kindOfTarget === 'event' ? { eventId: id } : { sessionId: id })
-      : undefined);
+    onAdd(
+      value, note, basis,
+      id ? (kindOfTarget === 'event' ? { eventId: id } : { sessionId: id }) : undefined,
+      // Only ever sent on the basis it means something on. `assertCostEntry`
+      // refuses it elsewhere, and this is what keeps a target from surviving a
+      // basis change into a filing where nothing would read it (ADR-022).
+      appliesTo,
+    );
     setAmount('');
     setNote('');
     setError('');
@@ -216,6 +381,22 @@ export function CostsPanel({
               options={targets}
             />
 
+            {/*
+              What a per-unit cost rides on. Only this basis has items to name:
+              a cost charged once for a service, or per ticket, or as a share of
+              sales, has no item for the amount to be divided by, and offering
+              the control there would suggest a filter every figure ignores
+              (ADR-022).
+            */}
+            {basis === 'per-unit' && (
+              <Select
+                label="Charged on"
+                value={charge}
+                onChange={setCharge}
+                options={chargeOptions}
+              />
+            )}
+
             <div className="grid gap-[6px]" style={{ gridTemplateColumns: '1fr 1fr' }}>
               {BASES.map((b, index) => {
                 // Offered only when it has somewhere to go. The alternative —
@@ -265,6 +446,66 @@ export function CostsPanel({
                 );
               })}
             </div>
+
+            {/*
+              What this will actually be filed as, in a sentence.
+
+              Under the basis rather than beside the dropdown, because it is the
+              consequence of every control above it taken together — the basis
+              says what the amount is charged per, the target says whose it is,
+              and neither alone tells the shop that Rs 3,000 is about to be paid
+              once for three days of trading.
+            */}
+            <div
+              className="flex flex-col gap-[3px] px-[11px] py-[9px] rounded-[10px] border"
+              style={{ borderColor: alpha(ACCENT, 0.35), background: alpha(ACCENT, 0.07) }}
+              data-cost-attachment={basis}
+            >
+              <span className="text-[12.5px] leading-[17px] text-[var(--app-text)]">
+                {attachment}
+              </span>
+              {itemAttachment && (
+                <span
+                  className="text-[12.5px] leading-[17px] text-[var(--app-text-secondary)]"
+                  data-cost-item-attachment
+                >
+                  {itemAttachment}
+                </span>
+              )}
+            </div>
+
+            {/*
+              The dead end, turned into the thing the shop was trying to do.
+
+              1C-i correctly disabled `per-event` where it had nowhere to go and
+              said why — but "group the sessions first" is an instruction to go
+              somewhere else and come back. Where the scope is one session in no
+              event, there is exactly one session to group, and the shop can say
+              so from here.
+
+              ADR-018 still stands: the program is not inventing the event. The
+              button names what it will make and a person presses it.
+            */}
+            {!perEvent.available && perEvent.makeable && (
+              <div
+                className="flex flex-col items-start gap-[7px] px-[11px] py-[10px] rounded-[10px] border"
+                style={{ borderColor: 'var(--app-border)', background: 'var(--app-bg-darker)' }}
+                data-cost-make-event
+              >
+                <span className="text-[12.5px] leading-[17px] text-[var(--app-text-secondary)]">
+                  {perEvent.makeable.name} isn&rsquo;t part of an event. Make it one and this cost
+                  can belong to the market rather than to the day.
+                </span>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => onMakeEvent(perEvent.makeable!.sessionId)}
+                  data-cost-make-event-action
+                >
+                  Make {perEvent.makeable.name} an event
+                </Button>
+              </div>
+            )}
 
             <Button type="submit" variant="primary" block data-cost-add icon={<Plus size={16} />}>
               Add cost

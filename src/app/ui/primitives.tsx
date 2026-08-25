@@ -385,6 +385,16 @@ export interface SelectOption<T extends string> {
   label: string;
   /** A second line, for when the label alone is ambiguous. */
   detail?: string;
+  /**
+   * How far to indent, for a list whose options contain one another — an event
+   * and the sessions inside it.
+   *
+   * Presentation only. It says nothing about what selecting the option does,
+   * and a child is selected exactly like a parent; the indent is there because
+   * a flat list of events and sessions never showed which sessions belonged to
+   * which market. Omitted or 0 is a top-level row.
+   */
+  depth?: number;
 }
 
 export interface SelectProps<T extends string> {
@@ -473,14 +483,16 @@ export function Select<T extends string>({
               </span>
             )}
             {options.map(option => (
-              <PopoverItem
-                key={option.value}
-                title={option.label}
-                detail={option.detail}
-                selected={option.value === value}
-                onClick={() => { onChange(option.value); close(); }}
-                data-select-option={option.value}
-              />
+              <div key={option.value} style={{ paddingLeft: (option.depth ?? 0) * 20 }}>
+                <PopoverItem
+                  title={option.label}
+                  detail={option.detail}
+                  selected={option.value === value}
+                  onClick={() => { onChange(option.value); close(); }}
+                  data-select-option={option.value}
+                  data-select-depth={option.depth ?? 0}
+                />
+              </div>
             ))}
           </>
         )}

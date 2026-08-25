@@ -40,6 +40,7 @@ export function AnalyticsScreen({
       events={sessions.state.tradingEvents}
       costs={sessions.state.costEntries}
       onAddCost={sessions.actions.addCost}
+      onMakeEvent={sessions.actions.makeSessionAnEvent}
       onRefileCost={sessions.actions.refileCost}
       onDeleteCost={sessions.actions.deleteCost}
       costBasisNoticeDismissed={settings.state.costBasisNoticeDismissed}

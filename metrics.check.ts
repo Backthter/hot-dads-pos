@@ -13,9 +13,9 @@ import {
 } from './src/app/analytics/metrics';
 import { buildMovement, effectiveMovements, postMovements } from './src/app/lib/inventory';
 import {
-  allEvents, costEntryIsCoherent, costsFiledAgainstEvent, costsForEvent, endSession, eventGroups,
-  eventStatus, needsRefiling, pauseSession, resumeSession, sessionTradingHours, startSession,
-  targetAfterBasisChange, ungroupedSessions,
+  allEvents, costEntryIsCoherent, costsFiledAgainstEvent, costsForEvent, describeCostItems,
+  describeCostTarget, endSession, eventGroups, eventStatus, needsRefiling, pauseSession,
+  resumeSession, sessionTradingHours, startSession, targetAfterBasisChange, ungroupedSessions,
 } from './src/app/lib/sessions';
 import {
   COST_ENTRY_COLUMNS, costEntryFromRow, costEntryToRow, parseCostAppliesTo,
@@ -1032,6 +1032,70 @@ check('dates with an event allow it', datedWith.perEvent.available, true);
 // make ADR-013's held-cost distinction meaningless, because the "event" and the
 // session would then be the same period.
 check('a session id never becomes an event id', loneScope.eventId === lone.id, false);
+
+/* ------------------------------- what the form says it is about to file as */
+// The copy is checked because it is the only place the money model is
+// explained to the person typing the number, and copy that drifts from the
+// code is exactly the debris ADR-012 left in HINT.costVariable.
+console.log('\nThe form names its target');
+
+check('per-session names the service',
+  describeCostTarget({ basis: 'per-session', session: { name: 'Sat 14 Aug' } }),
+  'Charged once for this service — Sat 14 Aug');
+check('per-session with nothing running says so',
+  describeCostTarget({ basis: 'per-session' }),
+  'Charged once — no session running, so it is dated only');
+check('per-event names the market and its span',
+  describeCostTarget({
+    basis: 'per-event',
+    event: { name: 'Winter Market', sessionCount: 3, span: '14–16 Aug' },
+  }),
+  'Charged once for the whole event — Winter Market, 3 sessions, 14–16 Aug');
+// The case ADR-021 exists for: the pitch fee is paid on Saturday morning, and
+// the event it belongs to has not traded yet.
+check('a planned event says it has not traded',
+  describeCostTarget({ basis: 'per-event', event: { name: 'Winter Market', sessionCount: 0 } }),
+  'Charged once for the whole event — Winter Market, no sessions yet');
+check('an event of one is singular',
+  describeCostTarget({
+    basis: 'per-event', event: { name: 'Sunday Fair', sessionCount: 1, span: '14 Aug' },
+  }),
+  'Charged once for the whole event — Sunday Fair, 1 session, 14 Aug');
+check('per-event with nothing picked asks',
+  describeCostTarget({ basis: 'per-event' }),
+  'Charged once for the whole event — pick which one');
+check('per-order names the session',
+  describeCostTarget({ basis: 'per-order', session: { name: 'Sat 14 Aug' } }),
+  'Charged with every ticket in Sat 14 Aug');
+check('per-unit is about the items',
+  describeCostTarget({ basis: 'per-unit' }), 'Charged with every item sold');
+check('per-revenue is a share',
+  describeCostTarget({ basis: 'per-revenue' }), "Taken as a share of this period's sales");
+
+// And what a per-unit cost rides on (ADR-022).
+check('no target means everything',
+  describeCostItems(undefined, { items: [] }), 'Charged with every item sold');
+check('one item reads as one item',
+  describeCostItems({ kind: 'items', ids: ['a'] }, { items: ['Burger'] }),
+  'Charged with every Burger sold');
+check('two are joined with and',
+  describeCostItems({ kind: 'items', ids: ['a', 'd'] }, { items: ['Burger', 'Cola'] }),
+  'Charged with every Burger and Cola sold');
+check('a long list is cut short honestly',
+  describeCostItems({ kind: 'items', ids: ['1', '2', '3', '4', '5'] },
+    { items: ['Burger', 'Cola', 'Fries', 'Wrap', 'Shake'] }),
+  'Charged with every Burger, Cola and Fries sold, and 2 more');
+check('a category names the category',
+  describeCostItems({ kind: 'category', id: 'cat-drinks' }, { items: [], category: 'Drinks' }),
+  'Charged with every item in Drinks');
+// A category that has been deleted resolves to nothing, and the form says so
+// rather than reading as "everything" — which is what the absent case means.
+check('a deleted category is not read as everything',
+  describeCostItems({ kind: 'category', id: 'gone' }, { items: [] }),
+  'Charged with every item in a category that no longer exists');
+check('an empty item list is not read as everything',
+  describeCostItems({ kind: 'items', ids: [] }, { items: [] }),
+  'Charged with nothing — no items picked');
 
 /* --------------------------------- the target that survives a basis change */
 // This rule lived as one statement inside an onClick, on a .map over the five

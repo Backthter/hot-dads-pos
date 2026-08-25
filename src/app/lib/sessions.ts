@@ -1,4 +1,6 @@
-import type { CostBasis, CostEntry, Order, TradingEvent, TradingSession } from '../types';
+import type {
+  CostAppliesTo, CostBasis, CostEntry, Order, TradingEvent, TradingSession,
+} from '../types';
 
 /**
  * Trading sessions and the events that group them.
@@ -504,6 +506,87 @@ export const COST_BASIS_LABEL: Record<CostBasis, string> = {
 export function targetAfterBasisChange(basis: CostBasis, target: string): string {
   if (basis !== 'per-event') return target;
   return target.startsWith('event:') ? target : '';
+}
+
+/**
+ * What a cost is about to be filed against, in words.
+ *
+ * The form used to state the attachment only as a value in a dropdown, which
+ * says what was picked and not what picking it means. "Whole event" and
+ * "Winter Market" are both true and neither says that the amount is paid once
+ * for three days of trading — and a shop that misreads that files a pitch fee
+ * three times.
+ *
+ * A pure function, and checked, because this is the one place the model is
+ * explained to the person typing the number. Copy that drifts away from what
+ * the code does is what ADR-012 left behind in `HINT.costVariable`, still
+ * describing a cost kind that no longer exists.
+ */
+export interface CostTargetDescription {
+  basis: CostBasis;
+  /** The event it is filed against, when it is one. */
+  event?: { name: string; sessionCount: number; span?: string };
+  /** The session it is filed against, when it is one. */
+  session?: { name: string };
+}
+
+export function describeCostTarget(d: CostTargetDescription): string {
+  switch (d.basis) {
+    case 'per-session':
+      return d.session
+        ? `Charged once for this service — ${d.session.name}`
+        : 'Charged once — no session running, so it is dated only';
+    case 'per-event': {
+      if (!d.event) return 'Charged once for the whole event — pick which one';
+      // A planned event has no span, and saying so is the point of ADR-021:
+      // the pitch fee is paid on Saturday morning, before Sunday exists.
+      const what = d.event.sessionCount === 0
+        ? 'no sessions yet'
+        : `${d.event.sessionCount} session${d.event.sessionCount === 1 ? '' : 's'}`
+          + (d.event.span ? `, ${d.event.span}` : '');
+      return `Charged once for the whole event — ${d.event.name}, ${what}`;
+    }
+    case 'per-order':
+      return d.session
+        ? `Charged with every ticket in ${d.session.name}`
+        : "Charged with every ticket in this period";
+    case 'per-unit':
+      return 'Charged with every item sold';
+    case 'per-revenue':
+      return "Taken as a share of this period's sales";
+  }
+}
+
+/**
+ * What a `per-unit` cost is charged against, in words (ADR-022).
+ *
+ * Separate from `describeCostTarget` because it answers a different question —
+ * that one says which period or event owns the amount, this one says which
+ * things on the menu it rides on. A cost can have both.
+ *
+ * Names are passed in rather than looked up: this file knows about sessions and
+ * costs, not about the menu, and a lookup here would be the second place the
+ * category-id-to-name join happens. See `salesMix`.
+ */
+export function describeCostItems(
+  appliesTo: CostAppliesTo | undefined,
+  names: { items: string[]; category?: string },
+): string {
+  if (!appliesTo) return 'Charged with every item sold';
+  if (appliesTo.kind === 'category') {
+    return names.category
+      ? `Charged with every item in ${names.category}`
+      : 'Charged with every item in a category that no longer exists';
+  }
+  if (names.items.length === 0) return 'Charged with nothing — no items picked';
+  const shown = names.items.slice(0, 3);
+  const rest = names.items.length - shown.length;
+  const list = shown.length === 1
+    ? shown[0]
+    : `${shown.slice(0, -1).join(', ')} and ${shown[shown.length - 1]}`;
+  return rest > 0
+    ? `Charged with every ${list} sold, and ${rest} more`
+    : `Charged with every ${list} sold`;
 }
 
 /** `Rs 1,200 for this session`, `18 % of sales`. Amount and unit, never apart. */

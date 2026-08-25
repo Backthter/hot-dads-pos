@@ -77,6 +77,24 @@ export interface PerEventAvailability {
   available: boolean;
   /** Plain-language reason, and what to do about it. Absent when available. */
   reason?: string;
+  /**
+   * The lone session this scope is looking at, when there is one and it could
+   * be made an event.
+   *
+   * Present only in the case the form can actually offer a way out of: a
+   * session scope belonging to no event. Absent on a date scope in a shop with
+   * no events at all, because there is no single session there to make one of.
+   *
+   * This is here rather than worked out in the panel for ADR-018's reason — the
+   * resolver decides whether `per-event` has anywhere to go, and the form asks.
+   * A panel that found the session itself would be a second answer to the same
+   * question, and the two would disagree the first time either moved.
+   *
+   * **It names a session; it does not make an event.** ADR-018 rejects the
+   * program creating one so a basis stops being disabled. What makes it
+   * legitimate is that a person presses something that says what it will do.
+   */
+  makeable?: { sessionId: string; name: string };
 }
 
 const NO_EVENT_HERE =
@@ -183,7 +201,16 @@ export function resolveScope(scope: Scope, input: ScopeInput): ResolvedScope {
         eventId,
         perEvent: eventId !== undefined
           ? { available: true }
-          : { available: false, reason: NO_EVENT_HERE },
+          : {
+            available: false,
+            reason: NO_EVENT_HERE,
+            // One session, in no event. This is the case the form can offer a
+            // button for; an event scope never reaches here and a date scope
+            // has no single session to name.
+            ...(scope.kind === 'session' && members.length === 1
+              ? { makeable: { sessionId: members[0].id, name: members[0].name } }
+              : {}),
+          },
       };
     }
     // The session or event was deleted out from under the picker. Fall through

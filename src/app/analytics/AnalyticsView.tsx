@@ -30,7 +30,8 @@ import {
 import { eventGroups } from '../lib/sessions';
 import type { CostScope, DateRange } from './metrics';
 import type {
-  Category, CostBasis, CostEntry, InventorySnapshot, MenuItem, MenuItemStockAssignment, Order,
+  Category, CostAppliesTo, CostBasis, CostEntry, InventorySnapshot, MenuItem,
+  MenuItemStockAssignment, Order,
   OversellEvent, StockItem, StockMovement, TradingEvent, TradingSession,
 } from '../types';
 
@@ -78,7 +79,15 @@ export interface AnalyticsViewProps {
   sessions: TradingSession[];
   events: TradingEvent[];
   costs: CostEntry[];
-  onAddCost: (amount: number, note: string, basis: CostBasis, target?: { sessionId?: string; eventId?: string }) => void;
+  onAddCost: (
+    amount: number,
+    note: string,
+    basis: CostBasis,
+    target?: { sessionId?: string; eventId?: string },
+    appliesTo?: CostAppliesTo,
+  ) => void;
+  /** Makes an event of one from a session, so a cost can belong to the market. */
+  onMakeEvent: (sessionId: string) => void;
   /** Changes what a cost is charged per. The migration notice is its one caller. */
   onRefileCost: (id: string, basis: CostBasis) => void;
   onDeleteCost: (id: string) => void;
@@ -464,7 +473,10 @@ export function AnalyticsView(props: AnalyticsViewProps) {
                 costs={costs}
                 sessions={sessions}
                 events={events}
+                menuItems={menuItems}
+                menuCategories={menuCategories}
                 onAdd={props.onAddCost}
+                onMakeEvent={props.onMakeEvent}
                 onRefile={props.onRefileCost}
                 onDelete={props.onDeleteCost}
                 scopeLabel={resolved.label}

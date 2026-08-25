@@ -15,7 +15,9 @@ import {
 } from '../lib/sessions';
 import type { StateCore } from './core';
 import type { ExplainNotUndoable } from './useNotUndoable';
-import type { CostBasis, CostEntry, Order, TradingEvent, TradingSession } from '../types';
+import type {
+  CostAppliesTo, CostBasis, CostEntry, Order, TradingEvent, TradingSession,
+} from '../types';
 
 /**
  * Trading sessions, the events that group them, and the costs logged against
@@ -395,6 +397,13 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
     note: string,
     basis: CostBasis,
     target?: { sessionId?: string; eventId?: string },
+    /**
+     * Which menu items a `per-unit` cost is charged against (ADR-022).
+     * Ignored on every other basis, where it names nothing the amount is
+     * divided by — `assertCostEntry` would refuse it, and dropping it here
+     * means a stale selection on the form cannot throw at the shop.
+     */
+    appliesTo?: CostAppliesTo,
   ) => {
     if (!(amount > 0)) return;
     const live = snapshot.current.tradingSessions.find(s => s.status === 'active');
@@ -415,6 +424,7 @@ export function useSessions(core: StateCore, explainNotUndoable: ExplainNotUndoa
       amount,
       note: note.trim(),
       basis,
+      ...(appliesTo && basis === 'per-unit' ? { appliesTo } : {}),
       timestamp: Date.now(),
     });
     const next = [...before, entry];
