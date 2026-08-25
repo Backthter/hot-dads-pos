@@ -1,5 +1,7 @@
 import { effectiveMovements, resolveDealComponent, unitCostFor } from '../lib/inventory';
-import { sessionTradingHours } from '../lib/sessions';
+import {
+  costsForEvent, ordersForSession, ordersForSessions, sessionTradingHours,
+} from '../lib/sessions';
 import type {
   CartItem, Category, CostAppliesTo, CostBasis, CostEntry, InventorySnapshot, MenuItem,
   MenuItemStockAssignment, Order, OversellEvent, StockItem, StockMovement, TradingSession,
@@ -1557,6 +1559,174 @@ export function breakEvenCrossing(
       ? BREAK_EVEN_BLOCKED.notYet
       : BREAK_EVEN_BLOCKED.negativeContribution,
   };
+}
+
+/* ------------------------------------------------------- the finance table */
+
+export interface FinanceRow {
+  /** The session or event id. Unique within the table. */
+  id: string;
+  /**
+   * What the row is about.
+   *
+   * `event` rows total the sessions above them and are the only place a
+   * `per-event` cost is charged rather than held (ADR-013). `unassigned` is
+   * orders taken before sessions existed, or outside one — never guessed into a
+   * session by timestamp (invariant 4).
+   */
+  kind: 'session' | 'event' | 'unassigned';
+  name: string;
+  /** When the row's trading started. Null for `unassigned`, which has no span. */
+  startedAt: number | null;
+  totals: Totals;
+  /**
+   * Rupees committed for this row whatever sells: `per-session`, plus
+   * `per-event` only on an event row.
+   */
+  operatingCosts: number;
+  /** Per-event rupees this row leaves to its event (ADR-013). Zero on an event row. */
+  heldEventCosts: number;
+  /**
+   * Net revenue less ingredients less operating costs.
+   *
+   * **Null when nothing in the row carries a cost.** Subtracting a known
+   * operating cost from a revenue whose ingredients are unknown produces a
+   * number that looks like profit and is not — invariant 2, one layer up from
+   * the line it protects.
+   */
+  netProfit: number | null;
+  /** `netProfit` over net revenue, as a percentage. Null for the same reason. */
+  netMarginPct: number | null;
+  breakEven: BreakEven;
+  crossing: BreakEvenCrossing;
+}
+
+/**
+ * One row per session, and an event row that totals them.
+ *
+ * The row axis is the caller's decision, because only the caller knows the
+ * scope: a date window rows the sessions that traded in it, an event rows its
+ * members and then itself, and a single session rows itself and then the market
+ * it belongs to. What this function owns is what a row *says* once it exists,
+ * so that all three cases produce the same arithmetic.
+ *
+ * **Each row resolves its own costs at its own scope.** A session row is
+ * `'session'`, so the market's pitch fee is held rather than shared out and
+ * lands in `heldEventCosts`; the event row is `'event'`, where the period
+ * genuinely does owe it. That is ADR-013 as a table: the held figure stops
+ * being a footnote under a KPI and becomes a cell you can read next to the
+ * session's own costs. Neither row double-counts, because the session's
+ * `operatingCosts` never includes the event's.
+ */
+export function financeRows(input: {
+  /** The sessions to draw a row for, in the order they should appear. */
+  sessions: TradingSession[];
+  /** An event to total them with, when the scope has one. */
+  event?: { id: string; name: string; sessions: TradingSession[] } | null;
+  /** Every order in scope, including those belonging to no session. */
+  orders: Order[];
+  /** Every cost entry in scope. */
+  costs: CostEntry[];
+  menuItems: MenuItem[];
+  mix: SalesMixEntry[] | null;
+  /** True on a date scope, where orders outside any session get their own row. */
+  includeUnassigned?: boolean;
+  now: number;
+}): FinanceRow[] {
+  const { sessions, event, orders, costs, menuItems, mix, now } = input;
+
+  const build = (
+    id: string,
+    kind: FinanceRow['kind'],
+    name: string,
+    startedAt: number | null,
+    rowOrders: Order[],
+    rowCosts: CostEntry[],
+    scope: CostScope,
+  ): FinanceRow => {
+    const totals = totalsFor(rowOrders);
+    const summary = costSummary(rowCosts);
+    const resolved = resolveCosts(summary, totals, scope, mix);
+    const be = breakEven(totals, summary, scope, mix);
+    const crossing = breakEvenCrossing(rowOrders, menuItems, summary, totals, scope, mix);
+
+    // Ingredients are only known for the costed part of the period. Reporting a
+    // profit over a revenue whose cost is partly unknown is the flattering
+    // answer produced automatically, so it is withheld instead.
+    const known = totals.costedRevenue > 0 || totals.cogs > 0;
+    const netProfit = known
+      ? totals.netRevenue - totals.cogs - resolved.fixed
+      : null;
+
+    return {
+      id,
+      kind,
+      name,
+      startedAt,
+      totals,
+      operatingCosts: resolved.fixed,
+      heldEventCosts: resolved.heldEventCosts,
+      netProfit,
+      netMarginPct: netProfit !== null && totals.netRevenue > 0
+        ? (netProfit / totals.netRevenue) * 100
+        : null,
+      breakEven: be,
+      crossing,
+    };
+  };
+
+  const rows: FinanceRow[] = sessions.map(session => build(
+    session.id,
+    'session',
+    session.name,
+    session.startedAt,
+    ordersForSession(orders, session.id),
+    // A session's costs are its own, plus the event's so that `'session'` scope
+    // can hold them back and report them. Without the second half the row would
+    // not know there was anything to hold.
+    costs.filter(c => (
+      c.sessionId === session.id
+      || (session.eventId !== undefined && c.eventId === session.eventId)
+    )),
+    'session',
+  ));
+
+  if (input.includeUnassigned) {
+    const loose = orders.filter(o => o.sessionId === undefined);
+    if (loose.length > 0) {
+      rows.push(build(
+        'unassigned',
+        'unassigned',
+        'Not in a session',
+        null,
+        loose,
+        // Dated costs: logged outside any session and belonging to no event.
+        costs.filter(c => c.sessionId === undefined && c.eventId === undefined),
+        'range',
+      ));
+    }
+  }
+
+  if (event) {
+    const ids = new Set(event.sessions.map(s => s.id));
+    rows.push(build(
+      event.id,
+      'event',
+      event.name,
+      event.sessions.length > 0 ? event.sessions[0].startedAt : null,
+      ordersForSessions(orders, ids),
+      costsForEvent(costs, event.id, ids),
+      'event',
+    ));
+  }
+
+  // `now` is taken and unused on purpose: every figure above is a fact about a
+  // period that has already been fixed by the scope, and a finance row that
+  // moved with the clock would put ADR-009's tick back into the memo wall. It
+  // stays in the signature so a later column that genuinely needs it — a live
+  // session's elapsed hours — does not have to change every call site.
+  void now;
+  return rows;
 }
 
 /* ------------------------------------------------------------ void rate */

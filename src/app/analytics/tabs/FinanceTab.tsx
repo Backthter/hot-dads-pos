@@ -2,8 +2,9 @@ import { motion } from 'motion/react';
 import { AlertTriangle, Clock, Coins, HelpCircle, ShoppingBag, Timer } from 'lucide-react';
 import { ACCENT, DANGER, KpiCard, Panel, RankedRows, Screen, money } from '../AnalyticsUI';
 import { Button } from '../../ui';
+import { FinanceTable } from './FinanceTable';
 import type {
-  DataQualityIssue, DeadStockItem, InventoryValue, QueueBand, SessionPerformance,
+  DataQualityIssue, DeadStockItem, FinanceRow, InventoryValue, QueueBand, SessionPerformance,
   StockoutStats, ThroughputStats, Totals, TurnoverStats,
 } from '../metrics';
 
@@ -34,6 +35,17 @@ export interface FinanceTabProps {
   shrink: { waste: number; variance: number };
   dead: DeadStockItem[];
   bySession: SessionPerformance[];
+  /** One row per session, and the event that totals them (ADR-013). */
+  financeRows: FinanceRow[];
+  /**
+   * Whether money columns are withheld.
+   *
+   * Finance declares `locked: 'all'`, so today this is always false when the
+   * tab is reachable at all. It is passed rather than assumed because the table
+   * is shared with Inventory, which is `money-columns` — a table that decided
+   * for itself would be two rules for one lock (ADR-019).
+   */
+  moneyHidden: boolean;
   /** The scope's own two figures, taken as values rather than as the scope. */
   tradingHours: number;
   sessionScoped: boolean;
@@ -47,7 +59,8 @@ const pct = (n: number) => `${n.toFixed(1)}%`;
 
 export function FinanceTab({
   issues, current, prior, tp, bands, stockouts, stock, turnover, shrink, dead, bySession,
-  tradingHours, sessionScoped, onOpenInventory, onOpenCosts, onOpenExplainer,
+  financeRows, moneyHidden, tradingHours, sessionScoped,
+  onOpenInventory, onOpenCosts, onOpenExplainer,
 }: FinanceTabProps) {
   return (
     <Screen>
@@ -102,6 +115,16 @@ export function FinanceTab({
           What each of these costs means
         </Button>
       </div>
+
+      {/*
+        The table first, because it answers the tab's own question.
+
+        The cards below say how the *period* is doing, which is one number per
+        thing. The table says which of several periods paid — Saturday against
+        Sunday, the market against its days — and carries the column this phase
+        was for: the ticket that covered the day's costs.
+      */}
+      <FinanceTable rows={financeRows} moneyHidden={moneyHidden} />
 
       {/*
         Finance answers "how did the day run" as well as "what did it make".

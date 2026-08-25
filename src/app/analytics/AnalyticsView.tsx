@@ -22,7 +22,7 @@ import {
 import { DEFAULT_SCOPE, resolveScope, trendBuckets, type Scope } from './scope';
 import {
   attachmentPairs, breakEven, breakEvenByItem, bucketsFor, categoryPerformance, costSummary,
-  dataQuality, itemMargins, stockPurchasesValue,
+  dataQuality, financeRows, itemMargins, stockPurchasesValue,
   deadStock, eventPerformance, foodCost, grainFor, inventoryTurnover, inventoryValue,
   itemPerformance, popularityTrend, queueBands, salesMix, sessionPerformance, shrinkageValue,
   stockoutStats, throughput, totalsFor, tradingHours, voidStats,
@@ -350,6 +350,43 @@ export function AnalyticsView(props: AnalyticsViewProps) {
 
   const be = useMemo(
     () => breakEven(current, scopedCosts, costScope, mix), [current, scopedCosts, costScope, mix]);
+
+  /**
+   * The Finance table's rows.
+   *
+   * The row axis is decided here because only this level knows the scope, and
+   * `financeRows` owns what a row says once it exists — so all three shapes
+   * below produce the same arithmetic (ADR-013 held costs included).
+   *
+   *  - a **date** window rows the sessions that traded in it, plus a row for
+   *    anything taken outside a session;
+   *  - an **event** rows its members and then totals them;
+   *  - a **session** rows itself, and then the market it belongs to — which is
+   *    where the held pitch fee stops being a footnote and becomes a cell.
+   *
+   * Keyed on the scoped lists rather than on `resolved`, whose identity changes
+   * on every clock tick.
+   */
+  const financeTableRows = useMemo(() => {
+    const scoped = resolved.scope;
+    const event = containingEvent
+      ?? (scoped.kind === 'event'
+        ? groups.find(g => g.grouped && g.id === scoped.id) ?? null
+        : null);
+    return financeRows({
+      sessions: scopedSessions,
+      event: event ? { id: event.id, name: event.name, sessions: event.sessions } : null,
+      orders: scopedOrders,
+      costs: scopedEntries,
+      menuItems,
+      mix,
+      includeUnassigned: !resolved.sessionScoped,
+      now,
+    });
+  }, [
+    scopedSessions, scopedOrders, scopedEntries, menuItems, mix, containingEvent,
+    groups, resolved.scope, resolved.sessionScoped, now,
+  ]);
   /**
    * Margin today and realised margin, per item.
    *
@@ -505,6 +542,8 @@ export function AnalyticsView(props: AnalyticsViewProps) {
                 shrink={shrink}
                 dead={dead}
                 bySession={bySession}
+                financeRows={financeTableRows}
+                moneyHidden={lock.moneyHidden}
                 tradingHours={resolved.tradingHours}
                 sessionScoped={resolved.sessionScoped}
                 onOpenInventory={props.onOpenInventory}

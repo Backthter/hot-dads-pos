@@ -7,7 +7,7 @@
  */
 import {
   BREAK_EVEN_BLOCKED, attachmentPairs, breakEven, breakEvenByItem, breakEvenCrossing, costSummary,
-  deadStock, perUnitChargeOf,
+  deadStock, financeRows, perUnitChargeOf,
   foodCost, inventoryTurnover, itemMargins, itemPerformance, ledgerLevelsAt, queueBands,
   resolveCosts, resolveRange, salesMix, shrinkageValue, stockPurchasesValue, stockoutStats,
   totalsFor, voidStats,
@@ -562,6 +562,121 @@ check('with no ticket named', notThereYet.order, null);
 check('a menu that never will',
   crossingOf(crossOrders, costsOf({ 'per-session': 1000, 'per-unit': 200 })).blocked,
   BREAK_EVEN_BLOCKED.negativeContribution);
+
+/* ---------------------------------------------------- the finance table */
+// Two days of one market. Saturday takes three tickets and Sunday two, each
+// ticket five burgers at Rs 100 with Rs 40 frozen on the line — so Rs 500 of
+// revenue and Rs 300 of contribution per ticket, as above.
+//
+// Costs: Rs 400 logged against Saturday, Rs 200 against Sunday, and a Rs 900
+// pitch fee against the market itself.
+console.log('\nFinance rows');
+
+const satSession: TradingSession = {
+  id: 'sat', name: 'Saturday', status: 'ended', startedAt: T, endedAt: T + 5 * HOUR,
+  ticketCounter: 3, pausedMs: 0, eventId: 'mkt',
+};
+const sunSession: TradingSession = {
+  id: 'sun', name: 'Sunday', status: 'ended', startedAt: T + 24 * HOUR,
+  endedAt: T + 29 * HOUR, ticketCounter: 2, pausedMs: 0, eventId: 'mkt',
+};
+const marketEvent = { id: 'mkt', name: 'Winter Market', sessions: [satSession, sunSession] };
+
+const finOrders = [
+  ...[1, 2, 3].map(n => crossTicket(n, { id: `sat${n}`, sessionId: 'sat' })),
+  ...[4, 5].map(n => crossTicket(n, { id: `sun${n}`, sessionId: 'sun' })),
+];
+const finCosts = [
+  cost({ id: 'f-sat', amount: 400, basis: 'per-session', sessionId: 'sat' }),
+  cost({ id: 'f-sun', amount: 200, basis: 'per-session', sessionId: 'sun' }),
+  cost({ id: 'f-pitch', amount: 900, basis: 'per-event', eventId: 'mkt' }),
+];
+const finRows = financeRows({
+  sessions: [satSession, sunSession],
+  event: marketEvent,
+  orders: finOrders,
+  costs: finCosts,
+  menuItems: [burger, drink],
+  mix: null,
+  now: T + 100 * HOUR,
+});
+
+check('a row per session, and one for the market', finRows.map(r => r.id), ['sat', 'sun', 'mkt']);
+check('and each says what it is', finRows.map(r => r.kind), ['session', 'session', 'event']);
+
+const sat = finRows[0];
+const sun = finRows[1];
+const market = finRows[2];
+
+// Saturday: three tickets of Rs 500. Its own Rs 400 is what it has to cover;
+// the pitch fee is the market's and is held (ADR-013).
+check('Saturday takings', sat.totals.netRevenue, 1500);
+check('Saturday covers its own costs only', sat.operatingCosts, 400);
+check('and is told what the market holds', sat.heldEventCosts, 900);
+check('Sunday covers its own', sun.operatingCosts, 200);
+check('and is told the same', sun.heldEventCosts, 900);
+
+// The market owes all three: 400 + 200 + 900.
+check('the market takes both days', market.totals.netRevenue, 2500);
+check('and owes every cost', market.operatingCosts, 1500);
+check('holding nothing back', market.heldEventCosts, 0);
+
+// The property that matters: the pitch fee is charged once. Summing the session
+// rows and the event row would double it, which is why the sessions hold rather
+// than share — and why heldEventCosts is a separate field and not an addend.
+check('the pitch fee is in no session row',
+  sat.operatingCosts + sun.operatingCosts, 600);
+check('and the market row is not the sum of the sessions',
+  market.operatingCosts - (sat.operatingCosts + sun.operatingCosts), 900);
+
+// Net profit: Saturday 1500 − 600 ingredients − 400 = 500.
+check('Saturday net profit', sat.netProfit, 500);
+check('and its margin', sat.netMarginPct, (500 / 1500) * 100);
+// The market: 2500 − 1000 − 1500 = 0.
+check('the market barely covers itself', market.netProfit, 0);
+
+// Each row crosses on its own costs. Saturday needs Rs 400 and banks Rs 300 a
+// ticket, so ticket 2. The market needs Rs 1,500 and takes until ticket 5.
+check('Saturday crosses at its second ticket', sat.crossing.order?.number, '02');
+check('the market crosses at the fifth', market.crossing.order?.number, '05');
+check('and the market crossing knows nothing is held', market.crossing.heldEventCosts, 0);
+
+// Invariant 2 at the row level: a period whose ingredients are unknown has no
+// profit, rather than a profit computed by subtracting a known cost from a
+// revenue whose cost is not known.
+const uncostedRows = financeRows({
+  sessions: [satSession],
+  orders: [crossTicket(1, { id: 'u1', sessionId: 'sat', items: [line('a', 'Burger', 5, 100)] })],
+  costs: [cost({ id: 'f-sat', amount: 400, basis: 'per-session', sessionId: 'sat' })],
+  menuItems: [burger],
+  mix: null,
+  now: T + 100 * HOUR,
+});
+check('no costed sale, no profit figure', uncostedRows[0].netProfit, null);
+check('and no margin either', uncostedRows[0].netMarginPct, null);
+check('though the takings are still reported', uncostedRows[0].totals.netRevenue, 500);
+
+// A date scope gives orders outside any session a row of their own, rather than
+// guessing them into one by timestamp (invariant 4).
+const looseRows = financeRows({
+  sessions: [satSession],
+  orders: [...finOrders.slice(0, 3), crossTicket(9, { id: 'loose', sessionId: undefined })],
+  costs: finCosts,
+  menuItems: [burger],
+  mix: null,
+  includeUnassigned: true,
+  now: T + 100 * HOUR,
+});
+check('orders in no session get their own row', looseRows.map(r => r.id), ['sat', 'unassigned']);
+check('and are not swept into the session', looseRows[0].totals.orders, 3);
+check('the loose row carries its own takings', looseRows[1].totals.netRevenue, 500);
+// Without the flag they are simply absent — an event scope has no business
+// showing orders that belong to no session in it.
+check('and are absent when not asked for',
+  financeRows({
+    sessions: [satSession], orders: [...finOrders.slice(0, 3), crossTicket(9, { id: 'loose', sessionId: undefined })],
+    costs: finCosts, menuItems: [burger], mix: null, now: T + 100 * HOUR,
+  }).length, 1);
 
 /* ---------------------------------------- what a table shows, and hides */
 // The two rules the three analytics tables rest on, checked as functions so
