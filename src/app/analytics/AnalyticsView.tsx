@@ -28,7 +28,7 @@ import {
   stockoutStats, throughput, totalsFor, tradingHours, voidStats,
 } from './metrics';
 import { eventGroups } from '../lib/sessions';
-import type { CostScope, DateRange } from './metrics';
+import type { CostScope, DateRange, FinanceRow } from './metrics';
 import type {
   Category, CostAppliesTo, CostBasis, CostEntry, InventorySnapshot, MenuItem,
   MenuItemStockAssignment, Order,
@@ -440,6 +440,25 @@ export function AnalyticsView(props: AnalyticsViewProps) {
   ]);
 
   /**
+   * A Finance row, opened as the money behind it.
+   *
+   * Three navigation steps, in one place, because the destination is a scope
+   * *and* a tab *and* a source — and a row that set two of the three would land
+   * somebody on the right screen showing the wrong period.
+   *
+   * An `unassigned` row leaves the scope alone rather than inventing one. Its
+   * orders belong to no session and guessing one from their timestamps is
+   * exactly what invariant 4 forbids; the current period already contains them,
+   * so the ledger it opens is the right answer to a slightly wider question.
+   */
+  const openMoneyFor = useCallback((row: FinanceRow) => {
+    if (row.kind === 'session') setScope({ kind: 'session', id: row.id });
+    if (row.kind === 'event') setScope({ kind: 'event', id: row.id });
+    setHistorySource('money');
+    setTab('history');
+  }, [setScope, setHistorySource, setTab]);
+
+  /**
    * Margin today and realised margin, per item.
    *
    * Deliberately outside the clock — neither figure depends on the time, and
@@ -595,6 +614,7 @@ export function AnalyticsView(props: AnalyticsViewProps) {
                 dead={dead}
                 bySession={bySession}
                 financeRows={financeTableRows}
+                onPickFinanceRow={openMoneyFor}
                 moneyHidden={lock.moneyHidden}
                 tradingHours={resolved.tradingHours}
                 sessionScoped={resolved.sessionScoped}

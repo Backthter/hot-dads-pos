@@ -38,6 +38,8 @@ export interface FinanceTabProps {
   bySession: SessionPerformance[];
   /** One row per session, and the event that totals them (ADR-013). */
   financeRows: FinanceRow[];
+  /** Opens the money ledger on the row's period. See `AnalyticsView`. */
+  onPickFinanceRow?: (row: FinanceRow) => void;
   /**
    * Whether money columns are withheld.
    *
@@ -60,7 +62,7 @@ const pct = (n: number) => `${n.toFixed(1)}%`;
 
 export function FinanceTab({
   issues, current, prior, tp, bands, stockouts, stock, turnover, shrink, dead, bySession,
-  financeRows, moneyHidden, tradingHours, sessionScoped,
+  financeRows, onPickFinanceRow, moneyHidden, tradingHours, sessionScoped,
   onOpenInventory, onOpenCosts, onOpenExplainer,
 }: FinanceTabProps) {
   return (
@@ -125,7 +127,11 @@ export function FinanceTab({
         Sunday, the market against its days — and carries the column this phase
         was for: the ticket that covered the day's costs.
       */}
-      <FinanceTable rows={financeRows} moneyHidden={moneyHidden} />
+      <FinanceTable
+        rows={financeRows}
+        moneyHidden={moneyHidden}
+        onPickRow={onPickFinanceRow}
+      />
 
       {/*
         Finance answers "how did the day run" as well as "what did it make".
