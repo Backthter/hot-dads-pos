@@ -24,6 +24,8 @@ import {
 import {
   TRADING_EVENT_COLUMNS, tradingEventFromRow, tradingEventToRow,
 } from './src/db/tradingEventRows';
+import { renderCell, visibleColumns } from './src/app/analytics/DataTable';
+import type { DataColumn } from './src/app/analytics/DataTable';
 import { resolveScope, type Scope } from './src/app/analytics/scope';
 import {
   DEFAULT_TAB, TABS, lockFor, migrateTabId, resolveLock, type HistorySource,
@@ -560,6 +562,36 @@ check('with no ticket named', notThereYet.order, null);
 check('a menu that never will',
   crossingOf(crossOrders, costsOf({ 'per-session': 1000, 'per-unit': 200 })).blocked,
   BREAK_EVEN_BLOCKED.negativeContribution);
+
+/* ---------------------------------------- what a table shows, and hides */
+// The two rules the three analytics tables rest on, checked as functions so
+// that 1C-iv inherits them rather than reimplementing them per table.
+console.log('\nTable columns');
+
+interface FauxRow { name: string; sold: number; takings: number | null }
+const fauxColumns: DataColumn<FauxRow>[] = [
+  { id: 'sold', label: 'Sold', value: r => r.sold },
+  { id: 'takings', label: 'Takings', value: r => r.takings, money: true },
+  { id: 'name', label: 'Name', value: r => r.name, align: 'left' },
+];
+
+// ADR-019: money is hidden, quantities are not. A locked till still has to
+// answer "how many" — that is the whole difference between hiding a column and
+// hiding the screen.
+check('every column shows when nothing is hidden', visibleColumns(fauxColumns, false).length, 3);
+const locked = visibleColumns(fauxColumns, true);
+check('a money column is dropped under the lock', locked.map(c => c.id), ['sold', 'name']);
+check('and a quantity column is not', locked.some(c => c.id === 'sold'), true);
+
+// Invariant 2, at the last layer it can be broken at. The engine keeps "no cost
+// on file" and "cost of nothing" apart the whole way here; a table that renders
+// null as 0 throws that away in the final inch, and reports the flattering
+// number on exactly the rows nobody can check.
+check('an unknown renders as a dash', renderCell(null), '—');
+check('and is not confused with zero', renderCell(0, n => `Rs ${n}`), 'Rs 0');
+check('a known value is formatted', renderCell(1200, n => `Rs ${n}`), 'Rs 1200');
+check('an unformatted value still prints', renderCell('Saturday'), 'Saturday');
+check('and an unknown ignores the formatter', renderCell(null, n => `Rs ${n}`), '—');
 
 /* ------------------------------------------------------------ cost basis */
 // Each basis totals on its own and touches no other. The amounts are chosen so
