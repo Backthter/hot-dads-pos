@@ -46,6 +46,8 @@ export interface BusinessTabProps {
   trendPoints: { id: string; label: string; sessionIds: string[] }[];
   /** The event a session scope belongs to, when it belongs to a real one. */
   eventName: string | null;
+  /** Sessions in the containing event, for the event-of-one wording (ADR-023). */
+  eventSessionCount: number;
   onOpenEvent?: () => void;
   /** Costs are logged from Finance now, so break-even points there. */
   onOpenCosts: () => void;
@@ -56,7 +58,7 @@ const pct = (n: number) => `${n.toFixed(1)}%`;
 export function BusinessTab({
   current, prior, comparisonLabel, revenuePerHour, tradingHours, sessionScoped,
   food, be, beByItem, voids, items, categories, buckets, grainLabel, hours, byEvent,
-  busiestHour, pairs, trend, trendPoints, eventName, onOpenEvent, onOpenCosts,
+  busiestHour, pairs, trend, trendPoints, eventName, eventSessionCount, onOpenEvent, onOpenCosts,
 }: BusinessTabProps) {
   return (
     <Screen>
@@ -138,6 +140,7 @@ export function BusinessTab({
         fixedCosts={be.fixedCosts}
         heldEventCosts={be.heldEventCosts}
         eventName={eventName}
+        eventSessionCount={eventSessionCount}
         onOpenEvent={onOpenEvent}
         onOpenCosts={onOpenCosts}
       />
@@ -317,7 +320,8 @@ function Sparkline({ points }: { points: number[] }) {
  * useful if you can hold it in your head on the way back to the grill.
  */
 function BreakEvenByItem({
-  rows, blocked, fixedCosts, heldEventCosts, eventName, onOpenEvent, onOpenCosts,
+  rows, blocked, fixedCosts, heldEventCosts, eventName, eventSessionCount,
+  onOpenEvent, onOpenCosts,
 }: {
   rows: ItemBreakEven[];
   blocked?: string;
@@ -325,6 +329,8 @@ function BreakEvenByItem({
   /** Per-event rupees this figure deliberately leaves to the event (ADR-013). */
   heldEventCosts: number;
   eventName: string | null;
+  /** How many sessions the containing event has. One is the case ADR-023 is about. */
+  eventSessionCount: number;
   onOpenEvent?: () => void;
   onOpenCosts: () => void;
 }) {
@@ -340,10 +346,36 @@ function BreakEvenByItem({
    * break-even change after Sunday traded, which is the moving target ADR-012
    * removed and ADR-013 keeps removed.
    */
+  /*
+   * An event of one is the case where holding the cost back reads as though the
+   * figure were hiding money from itself: both scopes cover the same trading,
+   * so the session appears to break even while its pitch fee sits outside the
+   * number (ADR-023).
+   *
+   * The arithmetic is right and is deliberately not special-cased. Allocating
+   * when `sessions.length === 1` sounds like a narrow exception and is not: add
+   * a second session to the market later and this session's break-even would
+   * move retroactively, which is precisely what ADR-013 forbids. So the fix is
+   * in what this says, not in what it computes.
+   */
+  const onlySession = eventSessionCount === 1;
   const eventNote = heldEventCosts > 0 ? (
     <p className="text-[var(--app-text-muted)] text-[12px] leading-[17px] pt-[10px]">
-      {eventName ?? 'The event'} carries {money(heldEventCosts)} of its own on top of this, paid
-      once for the whole event rather than by this session.
+      {onlySession ? (
+        <>
+          <span className="font-semibold" style={{ color: 'var(--app-text-secondary)' }}>
+            {eventName ?? 'The event'} · {money(heldEventCosts)} held
+          </span>
+          {' — '}this is the event&rsquo;s only session, so the whole of it applies to this
+          trading. It is held back rather than folded in so the figure cannot move if another
+          day joins the market later.
+        </>
+      ) : (
+        <>
+          {eventName ?? 'The event'} carries {money(heldEventCosts)} of its own on top of this,
+          paid once for the whole event rather than by this session.
+        </>
+      )}
       {onOpenEvent && (
         <button
           type="button"
@@ -351,8 +383,9 @@ function BreakEvenByItem({
           className="ml-[6px] underline underline-offset-2 font-semibold"
           style={{ color: theme.color }}
           data-open-event-scope
+          data-event-of-one={onlySession ? '' : undefined}
         >
-          See the whole event
+          {onlySession ? 'See the event' : 'See the whole event'}
         </button>
       )}
     </p>

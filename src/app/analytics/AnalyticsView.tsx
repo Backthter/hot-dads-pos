@@ -545,6 +545,7 @@ export function AnalyticsView(props: AnalyticsViewProps) {
                 trend={trend}
                 trendPoints={trendPoints}
                 eventName={containingEvent?.name ?? null}
+                eventSessionCount={containingEvent?.sessions.length ?? 0}
                 onOpenEvent={containingEvent
                   ? () => setScope({ kind: 'event', id: containingEvent.id })
                   : undefined}

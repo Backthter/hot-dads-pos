@@ -137,6 +137,19 @@ check('a session is not charged the event', beInSession.fixedCosts, 1000);
 check('and is told what the event carries', beInSession.heldEventCosts, 500);
 check('so its target is the session alone', beInSession.revenue, 1000 / 0.6);
 
+// An event of one is held back exactly like a market of three (ADR-023). The
+// temptation is to allocate when there is only one session to allocate to,
+// because both scopes then cover the same trading and the figure reads as
+// though it were hiding money from itself. It is not a narrow special case: a
+// second session joining the market later would move this session's break-even
+// retroactively, which is what ADR-013 forbids. The difference is explained in
+// the panel; the arithmetic below must be identical either way.
+check('an event of one holds its cost back too', beInSession.heldEventCosts, 500);
+check('and its fixed costs are the session\'s alone', beInSession.fixedCosts, 1000);
+check('so the figure cannot move when a day joins',
+  breakEven(beTotals, costsOf({ 'per-session': 1000, 'per-event': 500 }), 'session').revenue,
+  beInSession.revenue ?? 0);
+
 /* ------------------------- the property that was broken: the target holds still */
 // This is the regression that matters. The old formula divided the typed rupee
 // total of the variable costs by revenue-so-far and called the answer a rate,
