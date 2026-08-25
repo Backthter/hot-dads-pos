@@ -1880,6 +1880,9 @@ export interface MoneyRow {
   running: number;
   /** A cost paid for a whole event rather than a day's trading (ADR-013). */
   wholeEvent?: boolean;
+  /** How the takings were paid, on a sales row. Undefined on every other kind. */
+  cash?: number;
+  transfer?: number;
   sessionId?: string;
   eventId?: string;
   stockItemId?: string;
@@ -1896,6 +1899,44 @@ export interface MoneyLedgerResult {
   /** What came in, split by how it was taken. Sales rows only. */
   cash: number;
   transfer: number;
+}
+
+/**
+ * Orders a set of money rows, runs the balance down them, and totals them.
+ *
+ * Separate from `moneyLedger` because the screen filters. A running column that
+ * kept the whole ledger's balance while showing a third of its rows would be
+ * arithmetic the reader cannot check against what is in front of them —
+ * filtering to *stock bought* and reading a balance that includes every sale is
+ * worse than useless. So the column always means **the balance over the rows
+ * shown**, and this is the only place that is worked out.
+ *
+ * Rows with no amount are skipped rather than guessed at, which makes `running`
+ * a floor whenever `unpriced` is non-zero (invariant 2).
+ */
+export function accumulate(rows: MoneyRow[]): MoneyLedgerResult {
+  // A stable tie-break, because a delivery and a cost logged in the same minute
+  // must not swap places between renders.
+  const ordered = [...rows].sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
+
+  let running = 0;
+  let unpriced = 0;
+  let moneyIn = 0;
+  let moneyOut = 0;
+  let cash = 0;
+  let transfer = 0;
+
+  const settled = ordered.map(row => {
+    if (row.moneyIn === null && row.moneyOut === null) unpriced += 1;
+    moneyIn += row.moneyIn ?? 0;
+    moneyOut += row.moneyOut ?? 0;
+    cash += row.cash ?? 0;
+    transfer += row.transfer ?? 0;
+    running += (row.moneyIn ?? 0) - (row.moneyOut ?? 0);
+    return { ...row, running };
+  });
+
+  return { rows: settled, unpriced, moneyIn, moneyOut, cash, transfer };
 }
 
 /**
@@ -1995,9 +2036,6 @@ export function moneyLedger(input: {
 
   /* ---- what came in */
 
-  let cash = 0;
-  let transfer = 0;
-
   for (const session of sessions) {
     const taken = ordersForSession(orders, session.id);
     if (taken.length === 0) continue;
@@ -2006,8 +2044,6 @@ export function moneyLedger(input: {
     // in, is a fact rather than a reading of the clock, and still sorts the row
     // after everything that has happened.
     const last = taken.reduce((latest, o) => Math.max(latest, o.timestamp), 0);
-    cash += t.cash;
-    transfer += t.transfer;
     rows.push({
       id: `ses:${session.id}`,
       at: session.endedAt ?? last,
@@ -2017,6 +2053,8 @@ export function moneyLedger(input: {
       moneyOut: null,
       charge: null,
       running: 0,
+      cash: t.cash,
+      transfer: t.transfer,
       sessionId: session.id,
     });
   }
@@ -2039,8 +2077,6 @@ export function moneyLedger(input: {
   for (const [key, taken] of byDay) {
     const t = totalsFor(taken);
     const last = taken.reduce((latest, o) => Math.max(latest, o.timestamp), 0);
-    cash += t.cash;
-    transfer += t.transfer;
     rows.push({
       id: `day:${key}`,
       at: last,
@@ -2050,26 +2086,14 @@ export function moneyLedger(input: {
       moneyOut: null,
       charge: null,
       running: 0,
+      cash: t.cash,
+      transfer: t.transfer,
     });
   }
 
   /* ---- in order, with the balance accumulated down the column */
 
-  rows.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
-
-  let running = 0;
-  let unpriced = 0;
-  let moneyIn = 0;
-  let moneyOut = 0;
-  for (const row of rows) {
-    if (row.moneyIn === null && row.moneyOut === null) unpriced += 1;
-    moneyIn += row.moneyIn ?? 0;
-    moneyOut += row.moneyOut ?? 0;
-    running += (row.moneyIn ?? 0) - (row.moneyOut ?? 0);
-    row.running = running;
-  }
-
-  return { rows, unpriced, moneyIn, moneyOut, cash, transfer };
+  return accumulate(rows);
 }
 
 /* ------------------------------------------------------------ void rate */

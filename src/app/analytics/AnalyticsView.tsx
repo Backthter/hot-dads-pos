@@ -22,7 +22,7 @@ import {
 import { DEFAULT_SCOPE, resolveScope, trendBuckets, type Scope } from './scope';
 import {
   attachmentPairs, breakEven, breakEvenByItem, bucketsFor, categoryPerformance, costSummary,
-  dataQuality, financeRows, itemMargins, stockPurchasesValue,
+  dataQuality, financeRows, itemMargins, moneyLedger, stockPurchasesValue,
   deadStock, eventPerformance, foodCost, grainFor, inventoryTurnover, inventoryValue,
   itemPerformance, popularityTrend, queueBands, salesMix, sessionPerformance, shrinkageValue,
   stockoutStats, throughput, totalsFor, tradingHours, voidStats,
@@ -391,6 +391,54 @@ export function AnalyticsView(props: AnalyticsViewProps) {
     scopedSessions, scopedOrders, scopedEntries, menuItems, mix, containingEvent,
     groups, resolved.scope, resolved.sessionScoped, now,
   ]);
+  /* ----------------------------------------------------- History · Money */
+
+  /**
+   * Whether the ledger shows the period or everything on record.
+   *
+   * Default is the period, so the nav picker drives Money the way it drives
+   * every other table — and so a Finance row can drill through by setting the
+   * scope. The escape hatch exists because "where has the money gone" is
+   * sometimes a question about the whole year, and answering it by stepping the
+   * period picker through twelve months is not answering it.
+   */
+  const [moneyWidened, setMoneyWidened] = useStickyState('analytics.money.widen', false);
+
+  /**
+   * The mix the ledger charges its rate costs against.
+   *
+   * Widened, that has to be every order ever rather than the period's — a
+   * targeted per-unit cost spread over the wrong denominator is a wrong number,
+   * not a conservative one. Computed only when widened, because it walks every
+   * order there has ever been.
+   */
+  const moneyMix = useMemo(() => {
+    if (!moneyWidened) return mix;
+    const everything = { start: 0, end: Number.MAX_SAFE_INTEGER, label: 'All' };
+    return salesMix(itemPerformance(orders, menuItems, everything), menuItems, menuCategories);
+  }, [moneyWidened, mix, orders, menuItems, menuCategories]);
+
+  /**
+   * The money ledger's rows.
+   *
+   * Keyed on the stabilised lists rather than on `resolved`, whose identity
+   * changes on every clock tick. `moneyLedger` takes no `now` at all — a live
+   * session's sales row sits at its last order — so nothing here is live and
+   * nothing here rebuilds every five seconds (ADR-009).
+   */
+  const moneyRows = useMemo(() => moneyLedger({
+    orders: moneyWidened ? orders : scopedOrders,
+    costs: moneyWidened ? costs : scopedEntries,
+    movements,
+    stockItems,
+    sessions: moneyWidened ? sessions : scopedSessions,
+    mix: moneyMix,
+    range: moneyWidened ? { start: 0, end: Number.MAX_SAFE_INTEGER, label: 'All' } : range,
+  }), [
+    moneyWidened, orders, scopedOrders, costs, scopedEntries, movements, stockItems,
+    sessions, scopedSessions, moneyMix, range,
+  ]);
+
   /**
    * Margin today and realised margin, per item.
    *
@@ -605,6 +653,10 @@ export function AnalyticsView(props: AnalyticsViewProps) {
                 menuItems={menuItems}
                 sessions={sessions}
                 events={events}
+                stockItems={stockItems}
+                ledger={moneyRows}
+                moneyWidened={moneyWidened}
+                onToggleMoneyWiden={setMoneyWidened}
                 revenueLocked={revenueLocked}
                 onOpenExplainer={() => setSub('explainer')}
               />

@@ -1,9 +1,13 @@
 import { motion } from 'motion/react';
 import { Panel } from '../AnalyticsUI';
-import { Button, SegmentedControl } from '../../ui';
+import { SegmentedControl } from '../../ui';
 import { OrdersExplorer } from '../OrdersExplorer';
+import { MoneyLedger } from '../MoneyLedger';
 import { HISTORY_SOURCES, type HistorySource } from './model';
-import type { MenuItem, Order, TradingEvent, TradingSession } from '../../types';
+import type { MoneyLedgerResult, MoneyRow } from '../metrics';
+import type {
+  MenuItem, Order, StockItem, TradingEvent, TradingSession,
+} from '../../types';
 
 /**
  * History — what happened?
@@ -12,14 +16,14 @@ import type { MenuItem, Order, TradingEvent, TradingSession } from '../../types'
  * tabs. They answer the same question about different rows, and the shop is
  * more likely to want "what happened on Saturday" than "the orders screen".
  *
- * Only Orders has content — `OrdersExplorer`, moved in 1C-i and otherwise
- * unchanged. Stock and Money are shown as empty states naming the phase that
- * fills them rather than hidden until they work: a selector that grows options
- * later is a selector nobody knows to look for, and being told a thing is
- * coming is more use than being shown a control with one option on it.
+ * Orders is `OrdersExplorer`, moved in 1C-i and otherwise unchanged; Money is
+ * the ledger 1C-iii-b built. Stock is still an empty state naming the phase
+ * that fills it rather than hidden until it works: a selector that grows
+ * options later is a selector nobody knows to look for, and being told a thing
+ * is coming is more use than being shown a control with one option on it.
  *
- * The phases those states name are load-bearing copy and were wrong from the
- * 1C resequencing until 1C-iii-a. See the note in `tabs/model.ts`.
+ * The phase Stock's state names is load-bearing copy and was wrong from the 1C
+ * resequencing until 1C-iii-a. See the note in `tabs/model.ts`.
  *
  * The lock is per source, not per tab. Orders and Stock are open with the
  * revenue PIN set — Stock because it is quantities, Orders because it always
@@ -28,7 +32,8 @@ import type { MenuItem, Order, TradingEvent, TradingSession } from '../../types'
  * `OrdersExplorer`, which hides the money *inside* its own rows.
  */
 export function HistoryTab({
-  source, onChangeSource, orders, menuItems, sessions, events, revenueLocked, onOpenExplainer,
+  source, onChangeSource, orders, menuItems, sessions, events, stockItems,
+  ledger, moneyWidened, onToggleMoneyWiden, revenueLocked, onOpenExplainer,
 }: {
   source: HistorySource;
   onChangeSource: (next: HistorySource) => void;
@@ -36,6 +41,11 @@ export function HistoryTab({
   menuItems: MenuItem[];
   sessions: TradingSession[];
   events: TradingEvent[];
+  stockItems: StockItem[];
+  /** Computed in `AnalyticsView`'s memo wall, never here (ADR-009). */
+  ledger: MoneyLedgerResult;
+  moneyWidened: boolean;
+  onToggleMoneyWiden: (next: boolean) => void;
   revenueLocked: boolean;
   /** Money is where "which of these is what stock cost me" gets asked. */
   onOpenExplainer: () => void;
@@ -91,23 +101,17 @@ export function HistoryTab({
       )}
 
       {source === 'money' && (
-        <Panel title="Money" subtitle="The costs you have logged, and what stock has cost you — arriving in Phase 1C-iii-b">
-          <div className="flex flex-col gap-[10px] py-[10px]" data-history-empty="money">
-            <p className="text-[var(--app-text-secondary)] text-[14px] leading-[21px] max-w-[620px]">
-              This is where the money that is not a sale gets listed: what you logged
-              yourself — the pitch fee, staff, fuel — beside what left the till for stock.
-              One ledger, in the order it happened.
-            </p>
-            <p className="text-[var(--app-text-muted)] text-[13px] leading-[19px] max-w-[620px]">
-              Until then, the costs you have logged are listed under Log a cost on Finance.
-            </p>
-            <span>
-              <Button variant="quiet" size="sm" onClick={onOpenExplainer} data-open-costs-explainer>
-                What each of these costs means
-              </Button>
-            </span>
-          </div>
-        </Panel>
+        <div className="flex-1 min-h-0">
+          <MoneyLedger
+            ledger={ledger}
+            sessions={sessions}
+            events={events}
+            stockItems={stockItems}
+            widened={moneyWidened}
+            onToggleWiden={onToggleMoneyWiden}
+            onOpenExplainer={onOpenExplainer}
+          />
+        </div>
       )}
     </motion.div>
   );

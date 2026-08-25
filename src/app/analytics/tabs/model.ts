@@ -17,7 +17,7 @@
 
 export type TabId = 'finance' | 'inventory' | 'business' | 'history';
 
-/** What History is a history *of*. Only Orders has content in Phase 1C-i. */
+/** What History is a history *of*. Stock is the last one still empty. */
 export type HistorySource = 'orders' | 'stock' | 'money';
 
 /**
@@ -112,15 +112,15 @@ export const HISTORY_SOURCES: readonly HistorySourceDefinition[] = [
   // Quantities, not money. A stock history is the one place a locked till
   // still needs a straight answer.
   //
-  // These two named the wrong phases until 1C-iii-a. `PHASE-1C.md` resequenced
-  // the work when 1C-ii was inserted — Money moved to 1C-iii and Stock to
-  // 1C-iv — and neither string followed. The program was telling the shop to
-  // expect a screen in a phase that had already been and gone, which is the
-  // second time a resequencing has left copy behind; the first was the
-  // fixed/variable hints 1C-ii-b removed. Whoever moves a phase moves the
-  // strings that name it.
+  // This named the wrong phase until 1C-iii-a. `PHASE-1C.md` resequenced the
+  // work when 1C-ii was inserted — Money moved to 1C-iii and Stock to 1C-iv —
+  // and neither string followed, so the program was telling the shop to expect
+  // a screen in a phase that had already been and gone. Whoever moves a phase
+  // moves the strings that name it; 1C-iii-b cleared Money's by filling it.
   { id: 'stock', label: 'Stock', locked: 'none', arriving: '1C-iv' },
-  { id: 'money', label: 'Money', locked: 'all', arriving: '1C-iii-b' },
+  // Closed entirely with the PIN set: every row on it is money, and unlike
+  // Inventory there is no quantity underneath to leave visible.
+  { id: 'money', label: 'Money', locked: 'all' },
 ];
 
 /**
