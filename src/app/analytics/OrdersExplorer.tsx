@@ -1,12 +1,10 @@
 import { useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { ChevronDown, Plus, Save, Search, SlidersHorizontal, Trash2, X } from 'lucide-react';
+import { ChevronDown, Save, Search, SlidersHorizontal, Trash2, X } from 'lucide-react';
 import { ACCENT, DANGER, money } from './AnalyticsUI';
 import { orderMoney, totalsFor } from './metrics';
-import {
-  OPERATOR_LABELS, applyFilter, describeGroup, emptyGroup, fieldsFor, isGroup, newId,
-  operatorsFor, type Condition, type Group,
-} from './filters';
+import { applyFilter, describeGroup, fieldsFor, newId, type Group } from './filters';
+import { FilterBuilder, useFilterTree } from './FilterBuilder';
 import {
   categoryIndex, describeSearch, matchesSearch, parseSearch, searchHaystack, sessionIndex,
 } from './search';
@@ -31,7 +29,11 @@ export function OrdersExplorer({
   events: TradingEvent[];
   revenueLocked: boolean;
 }) {
-  const [group, setGroup] = useState<Group>(() => emptyGroup());
+  // The opening condition is Orders' own — *Total paid is more than 0* — and is
+  // stated here rather than guessed from the field list, so extracting the
+  // builder in 1C-iii-b changed nothing about this screen.
+  const { group, setGroup, actions } = useFilterTree(
+    () => ({ field: 'total', operator: 'gt', value: 0 }));
   const [saved, setSaved] = useState<{ id: string; name: string; group: Group; text: string }[]>([]);
   const [selected, setSelected] = useState<Order | null>(null);
   const [sort, setSort] = useState<'newest' | 'oldest' | 'largest' | 'event'>('newest');
@@ -98,53 +100,6 @@ export function OrdersExplorer({
 
   const totals = useMemo(() => totalsFor(results), [results]);
 
-  const update = (fn: (draft: Group) => void) => {
-    setGroup(prev => {
-      const copy: Group = JSON.parse(JSON.stringify(prev));
-      fn(copy);
-      return copy;
-    });
-  };
-
-  const findGroup = (root: Group, id: string): Group | null => {
-    if (root.id === id) return root;
-    for (const child of root.children) {
-      if (isGroup(child)) {
-        const found = findGroup(child, id);
-        if (found) return found;
-      }
-    }
-    return null;
-  };
-
-  const addCondition = (groupId: string) => update(draft => {
-    const target = findGroup(draft, groupId);
-    target?.children.push({ id: newId('c'), field: 'total', operator: 'gt', value: 0 });
-  });
-
-  const addSubGroup = (groupId: string) => update(draft => {
-    const target = findGroup(draft, groupId);
-    target?.children.push({ id: newId('g'), combinator: 'or', children: [] });
-  });
-
-  const removeNode = (nodeId: string) => update(draft => {
-    const strip = (g: Group) => {
-      g.children = g.children.filter(c => c.id !== nodeId);
-      g.children.forEach(c => { if (isGroup(c)) strip(c); });
-    };
-    strip(draft);
-  });
-
-  const patchCondition = (id: string, patch: Partial<Condition>) => update(draft => {
-    const walk = (g: Group) => {
-      g.children = g.children.map(c => {
-        if (isGroup(c)) { walk(c); return c; }
-        return c.id === id ? { ...c, ...patch } : c;
-      });
-    };
-    walk(draft);
-  });
-
   return (
     <div className="flex flex-col h-full min-h-0 gap-[12px]">
       <div className="flex items-center gap-[9px]">
@@ -199,19 +154,7 @@ export function OrdersExplorer({
             transition={{ type: 'spring', stiffness: 460, damping: 38 }}
             className="overflow-hidden"
           >
-            <GroupEditor
-              group={group}
-              fields={fields}
-              depth={0}
-              onAddCondition={addCondition}
-              onAddGroup={addSubGroup}
-              onRemove={removeNode}
-              onPatch={patchCondition}
-              onToggleCombinator={id => update(draft => {
-                const target = findGroup(draft, id);
-                if (target) target.combinator = target.combinator === 'and' ? 'or' : 'and';
-              })}
-            />
+            <FilterBuilder group={group} fields={fields} actions={actions} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -373,164 +316,6 @@ export function OrdersExplorer({
 }
 
 /* ------------------------------------------------------------ filter tree */
-
-function GroupEditor({
-  group, fields, depth, onAddCondition, onAddGroup, onRemove, onPatch, onToggleCombinator,
-}: {
-  group: Group;
-  fields: ReturnType<typeof fieldsFor>;
-  depth: number;
-  onAddCondition: (groupId: string) => void;
-  onAddGroup: (groupId: string) => void;
-  onRemove: (nodeId: string) => void;
-  onPatch: (id: string, patch: Partial<Condition>) => void;
-  onToggleCombinator: (groupId: string) => void;
-}) {
-  return (
-    <div
-      className="rounded-[12px] border p-[10px] flex flex-col gap-[7px]"
-      style={{
-        borderColor: depth === 0 ? 'var(--app-border)' : `${ACCENT}55`,
-        background: depth === 0 ? 'var(--app-bg-darker)' : 'transparent',
-      }}
-      data-filter-group={group.id}
-    >
-      <div className="flex items-center gap-[8px]">
-        <button
-          onClick={() => onToggleCombinator(group.id)}
-          data-combinator={group.id}
-          className="px-[10px] h-[26px] rounded-[7px] text-[11px] font-bold border"
-          style={{ borderColor: ACCENT, color: ACCENT, background: `${ACCENT}18` }}
-          title="Right now every condition has to match. Tap to switch to matching any one of them."
-        >
-          {group.combinator === 'and' ? 'ALL of' : 'ANY of'}
-        </button>
-        <button
-          onClick={() => onAddCondition(group.id)}
-          data-add-condition
-          className="flex items-center gap-[5px] px-[10px] h-[26px] rounded-[7px] text-[11px] font-semibold border border-[var(--app-border)] text-[var(--app-text-secondary)]"
-        >
-          <Plus size={11} /> Condition
-        </button>
-        {depth < 2 && (
-          <button
-            onClick={() => onAddGroup(group.id)}
-            data-add-group
-            className="flex items-center gap-[5px] px-[10px] h-[26px] rounded-[7px] text-[11px] font-semibold border border-[var(--app-border)] text-[var(--app-text-secondary)]"
-          >
-            <Plus size={11} /> Group
-          </button>
-        )}
-        {depth > 0 && (
-          <button onClick={() => onRemove(group.id)} className="ml-auto text-[var(--app-text-muted)]">
-            <Trash2 size={13} />
-          </button>
-        )}
-      </div>
-
-      {group.children.map(child => (
-        isGroup(child) ? (
-          <div key={child.id} className="pl-[14px]">
-            <GroupEditor
-              group={child} fields={fields} depth={depth + 1}
-              onAddCondition={onAddCondition} onAddGroup={onAddGroup}
-              onRemove={onRemove} onPatch={onPatch} onToggleCombinator={onToggleCombinator}
-            />
-          </div>
-        ) : (
-          <ConditionRow
-            key={child.id} condition={child} fields={fields}
-            onPatch={onPatch} onRemove={onRemove}
-          />
-        )
-      ))}
-    </div>
-  );
-}
-
-function ConditionRow({
-  condition, fields, onPatch, onRemove,
-}: {
-  condition: Condition;
-  fields: ReturnType<typeof fieldsFor>;
-  onPatch: (id: string, patch: Partial<Condition>) => void;
-  onRemove: (id: string) => void;
-}) {
-  const field = fields.find(f => f.id === condition.field) ?? fields[0];
-  const operators = operatorsFor(field.kind);
-  const needsValue = condition.operator !== 'exists' && condition.operator !== 'notExists';
-
-  const select = "bg-[var(--app-surface)] border border-[var(--app-border)] rounded-[7px] px-[8px] h-[30px] text-[var(--app-text)] text-[12px] focus:outline-none";
-
-  return (
-    <div className="flex items-center gap-[6px] pl-[4px]" data-condition={condition.id}>
-      <select
-        value={condition.field}
-        onChange={e => {
-          const next = fields.find(f => f.id === e.target.value)!;
-          onPatch(condition.id, {
-            field: next.id,
-            operator: operatorsFor(next.kind)[0],
-            value: next.kind === 'number' || next.kind === 'money' ? 0 : '',
-          });
-        }}
-        className={select}
-        data-condition-field
-      >
-        {[...new Set(fields.map(f => f.group))].map(groupName => (
-          <optgroup key={groupName} label={groupName}>
-            {fields.filter(f => f.group === groupName).map(f => (
-              <option key={f.id} value={f.id}>{f.label}</option>
-            ))}
-          </optgroup>
-        ))}
-      </select>
-
-      <select
-        value={condition.operator}
-        onChange={e => onPatch(condition.id, { operator: e.target.value as Condition['operator'] })}
-        className={select}
-        data-condition-operator
-      >
-        {operators.map(op => <option key={op} value={op}>{OPERATOR_LABELS[op]}</option>)}
-      </select>
-
-      {needsValue && (field.options ? (
-        <select
-          value={String(condition.value ?? '')}
-          onChange={e => onPatch(condition.id, { value: e.target.value })}
-          className={select}
-          data-condition-value
-        >
-          <option value="">choose…</option>
-          {field.options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
-      ) : (
-        <input
-          value={String(condition.value ?? '')}
-          onChange={e => onPatch(condition.id, { value: e.target.value })}
-          placeholder={field.kind === 'money' ? 'amount' : 'value'}
-          className={`${select} w-[120px]`}
-          data-condition-value
-        />
-      ))}
-
-      {condition.operator === 'between' && (
-        <input
-          value={String(condition.value2 ?? '')}
-          onChange={e => onPatch(condition.id, { value2: e.target.value })}
-          placeholder="and"
-          className={`${select} w-[100px]`}
-          data-condition-value2
-        />
-      )}
-
-      <button onClick={() => onRemove(condition.id)} className="text-[var(--app-text-muted)]">
-        <X size={13} />
-      </button>
-    </div>
-  );
-}
 
 /* ------------------------------------------------------------- drill-down */
 
