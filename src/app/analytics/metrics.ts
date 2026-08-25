@@ -670,7 +670,8 @@ export interface ItemBreakEven {
   menuItemId: string;
   name: string;
   /**
-   * What one of these leaves behind after ingredients and per-sale costs, at
+   * What one of these leaves behind after ingredients and every cost that
+   * scales with a sale — per ticket, per item, and any share of takings — at
    * **today's** price and today's recipe — because a target is about what to do
    * next, and a target computed from last month's prices is not actionable.
    */

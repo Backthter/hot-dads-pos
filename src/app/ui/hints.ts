@@ -87,8 +87,13 @@ export const HINT = {
   itemsByRevenue: 'A deal carries its whole price here, while the things inside it carry the units. That way neither is double-counted.',
   deadStock: 'Things you are holding that have not sold in a long time. Money sitting on a shelf.',
   costsPanel: 'The costs the till cannot see — the pitch fee, staff, fuel, packaging. Ingredients are worked out from stock on their own.',
-  costFixed: 'A cost that does not change with how much you sell — the pitch fee, a day of staff.',
-  costVariable: 'A cost that rises with every sale — packaging, a bag, a lid.',
+  // `costFixed` and `costVariable` were here, and were removed in Phase 1C-ii-b.
+  // They described the model ADR-012 replaced: "a cost that rises with every
+  // sale" is exactly the `variable` that was removed for never saying what it
+  // varied with. Nothing rendered them, so nothing on screen was wrong — but a
+  // hint that contradicts the model is a hint waiting to be reconnected. What a
+  // basis means now lives beside the control that sets it, in `BASIS_HINT` in
+  // `CostsPanel`, where the five bases are named one at a time.
   breakEven: 'How much you need to take before the day starts making money.',
 
   /* ------------------------------------------------------------- settings */

@@ -130,7 +130,7 @@ export function BusinessTab({
           label="Break-even revenue" value={be.revenue ?? 0} format={money}
           unavailable={be.blocked}
           tone={be.progress !== null && be.progress >= 1 ? GOOD : undefined}
-          definition={`How much you need to take before the day starts making money. ${be.contributionRatio !== null ? `${(be.contributionRatio * 100).toFixed(0)}p of every rupee is left after ingredients and per-sale costs. ` : ''}Log your pitch fee, staff and fuel from Finance to make this accurate.`}
+          definition={`How much you need to take before the day starts making money. ${be.contributionRatio !== null ? `${(be.contributionRatio * 100).toFixed(0)}p of every rupee is left after ingredients and the costs that scale with a sale — per ticket, per item and any share of takings. ` : ''}Log your pitch fee, staff and fuel from Finance to make this accurate.`}
         />
       </div>
 
