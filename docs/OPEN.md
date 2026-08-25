@@ -102,6 +102,34 @@ then reads margins before the next delivery. Low frequency, small magnitude.
 
 ---
 
+## `stockPurchasesValue` counts an unpriced delivery as Rs 0
+
+**Found:** 1C-iii-b · **Take it:** whichever phase next touches food cost or
+break-even's stock handling
+**Where:** `stockPurchasesValue` at `src/app/analytics/metrics.ts:777`, via
+`receiptValue(m, stockItems) ?? 0`.
+
+**What happens if it is not fixed:** a delivery entered with no price at all —
+no `totalCost`, no `unitCost`, and an item with no `costPerUnit` on file — adds
+nothing to what the shop is told it spent on stock. That is invariant 2's exact
+failure, in the flattering direction: *not known* read as *free*. It reaches
+break-even through `earlierStockCost` when **Count stock bought before this
+market** is on, so fixed costs come out too low and the day looks like it paid
+for itself sooner than it did.
+
+**Why it was deferred:** the `?? 0` is unchanged behaviour, not new — 1C-iii-b
+only extracted `receiptValue` and made the unknown *expressible*, which is what
+let the ledger report it honestly. Changing the aggregate changes a historical
+figure for anybody with an unpriced delivery, and the honest replacement is not
+a different number but a coverage figure beside it, the way `Totals.costCoverage`
+sits beside `cogs`. That is a change to what break-even returns, not a one-line
+fix.
+
+**Urgent when:** a shop starts entering deliveries without prices. The money
+ledger now shows exactly how many, which is the first time anyone can tell.
+
+---
+
 ## `useSettings.hydrate` gives up on the first failure
 
 **Found:** Phase 0 · **Take it:** unassigned
@@ -288,6 +316,35 @@ wants one. Building the picker first and finding the shape wrong is the more
 expensive order.
 
 **Urgent when:** the shop asks for it. There is no correctness pressure here.
+
+---
+
+## `financeRows` takes `now`, does not use it, and rebuilds every five seconds
+
+**Found:** 1C-iii-b · **Take it:** 1C-iv, with the Finance tab's layout
+**Where:** the `financeTableRows` memo at
+`src/app/analytics/AnalyticsView.tsx:370`, whose dependency array ends in `now`.
+
+**What happens if it is not fixed:** `financeRows` documents that it takes `now`
+and deliberately never reads it — every figure on a row is a fact about a period
+the scope has already fixed. The memo lists it anyway, so during a live session
+the whole Finance table, including a `breakEvenCrossing` per row, is rebuilt on
+every five-second tick to produce an identical answer. Nothing is wrong on
+screen; it is wasted work in exactly the place ADR-009 was written about, at
+exactly the time the machine is busiest.
+
+**Why it was deferred:** removing `now` from the array is one line and looks
+like a lint fix, but it makes the dependency array deliberately disagree with
+the function's signature — which is only safe while `financeRows` genuinely
+ignores it, and the signature exists precisely so a later column *can* use it.
+The clean fix is to stop passing `now` until something needs it. That is a
+signature change to a function 1C-iv is about to add columns to.
+
+**Urgent when:** a Finance column starts depending on the clock, at which point
+the arrangement has to be decided rather than inherited. `moneyLedger` took the
+other route in 1C-iii-b — no `now` at all — and is the worked example.
+
+---
 
 ---
 

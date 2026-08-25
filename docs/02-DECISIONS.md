@@ -1340,3 +1340,100 @@ and *"Rs 4,300 to go"* is a better answer than an em dash for the live case.
 Voided orders are skipped (invariant 5), so voiding the ticket that caused the
 crossing hands it to the next one rather than leaving it pointing at a row that
 no longer counts.
+
+---
+
+## ADR-025 — A cash ledger shows a per-event cost where it was paid; the Finance table holds it back
+
+**Status:** accepted · 2026-08 · Depends on ADR-013, ADR-023
+
+**Context:** ADR-013 settled what happens to a `per-event` cost when the reader
+is looking at one session out of a market: it is **held**, not apportioned.
+Splitting a three-day pitch fee across three days by hand is wrong, and
+splitting it automatically makes one afternoon's break-even move when a *later*
+afternoon trades well — the same moving target ADR-012 removed. The session row
+reports it as `heldEventCosts` and the event row carries it.
+
+History · Money is the first screen that is not about profit. It answers *what
+left the till, and when*, which is the outlay half of the split the costs
+explainer teaches. Applying ADR-013 here would mean scoping to Saturday, having
+paid the market Rs 3,000 on Saturday morning, and being shown a ledger of that
+Saturday with no Rs 3,000 in it.
+
+**Decision:** The money ledger shows a `per-event` cost **at its timestamp, in
+full, in whatever period contains that timestamp**, marked `wholeEvent` so the
+row says what it was for. The Finance table is unchanged.
+
+The two screens now report the same cost differently in the same scope, and that
+is correct, because they are answering different questions:
+
+| | Finance, session scope | History · Money |
+|---|---|---|
+| Question | did this afternoon pay? | what left the till? |
+| Measured on | consumption | cash |
+| A Rs 3,000 pitch fee paid that morning | held, reported as the event's | Rs 3,000, out, that morning |
+
+The check that asserts this asserts **both sides in one place**, so that a later
+reader who notices the disagreement finds the reason attached to it rather than
+"fixing" one to match the other. That is the failure this ADR exists to prevent:
+the disagreement looks exactly like a bug and is not.
+
+**Rejected:** *Apportioning the fee across the event's days.* Wrong for the cash
+question too — the money did not leave the till in three instalments.
+
+*Hiding it in a session scope, for consistency with ADR-013.* Consistency with a
+rule about profit, at the cost of a ledger that does not list a payment that
+happened. The ledger's entire value is that it is complete.
+
+*A separate "event costs" strip beside the ledger.* Puts a chronological fact
+outside the chronology, and the running balance would then be wrong or would
+have to skip it.
+
+---
+
+## ADR-026 — One ledger row per cost entry, with the amount always resolved to rupees
+
+**Status:** accepted · 2026-08 · Depends on ADR-012, ADR-022, ADR-025
+
+**Context:** `CostEntry.amount` is the only field in the program whose unit
+depends on another field. Rupees under `per-session` and `per-event`;
+rupees-per-ticket under `per-order`; rupees-per-item under `per-unit`; and
+**percentage points** under `per-revenue`. Convention 4 states the rule —
+amounts are comparable only within their basis — and the practical form of it on
+a table is *never put `amount` in a money column*, because `Rs 18` for a
+commission that cost Rs 640 is a plausible number that is not money.
+
+A rate has no single moment and no single amount. Two shapes were available: one
+row per entry per session, resolving each rate against that session's own
+volumes; or one row per entry, resolved over the period in view.
+
+**Decision:** **One row per cost entry**, at `entry.timestamp`, with the rupee
+column showing what that entry came to **over the period the ledger is showing**.
+A second line under the amount says what it resolved from — *18% of Rs 22,180
+taken*, *Rs 12 × 47 of 118 items* — because the rupee figure alone cannot be
+reconstructed by the reader.
+
+`resolveEntryAmount` is the only place this arithmetic exists, and
+`metrics.check.ts` asserts that summing it per basis reproduces exactly what
+`resolveCosts` produces for the same period, in both the with-mix and no-mix
+branches. Two functions answering one question is how `foodCost` and
+`stockPurchasesValue` came to disagree about a single delivery (ADR-014); this is
+that lesson applied before the fact rather than after.
+
+**The consequence, stated because it must be on screen:** a rate row's amount
+**moves when the period does**, and a flat-fee row's never does. A ledger whose
+rows normally look immutable is a bad place to hide that, so the screen says it
+once at the top rather than pretending otherwise or annotating every row.
+
+**Rejected:** *A row per entry per session.* Arithmetically finer — each rate
+charged against the volumes it was actually incurred over — and it turns one
+thing the shop typed into N rows it never did. Asked directly, the owner chose
+against it: keeping track of smaller numbers that comprise a whole is harder,
+not easier, and the ledger is meant to be read.
+
+*Excluding rate costs from the ledger entirely*, on the grounds that a per-item
+box cost never left the till as a discrete payment. Defensible, and it stops the
+screen answering the question it is titled with.
+
+*Showing the rate and letting the reader multiply.* That is the defect, written
+down as a feature.

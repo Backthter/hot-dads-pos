@@ -324,6 +324,27 @@ clock tick and undo ADR-009's work, so **a tab takes computed figures as props
 and computes nothing for itself.** What a tab does own is its own presentation
 state — which item break-even is showing, which cut the revenue chart is on.
 
+**Three things in the section are primitives rather than screens**, because more
+than one screen needs them and the alternative to sharing is three
+implementations that drift:
+
+| | What it is | Row-type-agnostic since |
+|---|---|---|
+| `analytics/DataTable.tsx` | the table Finance, Inventory and Business are made of. Columns are data and declare whether they are money, so the lock is applied by the table (ADR-019); `null` renders `—`, never `0` | 1C-iii-a |
+| `analytics/filters.ts` | the condition-tree query language. `FieldDef<Row>`, `applyFilter<Row>`, `describeGroup<Row>` — a screen supplies its own field list and gets the operators, the tree and the sentence | 1C-iii-b |
+| `analytics/FilterBuilder.tsx` | the builder those conditions are typed into, plus `useFilterTree` for the five recursive mutations | 1C-iii-b |
+
+`analytics/search.ts` is the free-text half and was already generic: it parses a
+query and matches it against a **haystack string**, so each screen supplies its
+own. `searchHaystack` builds one for an order; `moneyHaystack` in `MoneyLedger`
+builds one for a money row.
+
+The two field lists live together in `filters.ts` — `fieldsFor` for orders,
+`moneyFields` for money rows — as separate lists rather than one superset. A
+money row and an order share almost nothing, and one list covering both would be
+mostly fields that are null on half the rows, which is invariant 2's shape
+arriving through a filter instead of through a figure.
+
 The revenue PIN is a capability each tab declares — `'all' | 'money-columns' |
 'none'` — resolved in one place by `lockFor` and `resolveLock` (ADR-019).
 Nothing else in the section reads `revenueLocked` to decide whether to draw

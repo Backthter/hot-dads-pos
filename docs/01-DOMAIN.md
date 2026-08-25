@@ -583,6 +583,72 @@ a user with no PIN. Dates and counts only, until Phase 6 closes that gap.
 
 ---
 
+## The money ledger
+
+`moneyLedger` · `resolveEntryAmount` · `accumulate` ·
+`src/app/analytics/metrics.ts` · shown at History · Money
+
+**What left the till, and when.** Finance measures *consumption* — what the
+things you sold cost to make. This measures *outlay* — what actually left the
+till, on the day it left. They are the two halves of the split the costs
+explainer teaches, and they do not agree about the same delivery on purpose: a
+Rs 8,000 mince delivery and Rs 900 of mince eaten answer different questions.
+
+Three sources, one column:
+
+| Row | From | Placed at |
+|---|---|---|
+| **Stock bought** | one row per receipt — `added` and `packet` only (ADR-014), effective rows only (ADR-017) | the movement's timestamp |
+| **Cost** | one row per `CostEntry` | when it was logged |
+| **Sales** | one row per **session**, not per ticket | the session's end, or its last order while it is live |
+
+Orders belonging to no session roll up **per calendar day**. They are never
+swept into a session whose span happens to contain them — invariant 4 — so a day
+is the only grouping available that is not an invention.
+
+**A cost row's amount is always rupees.** `CostEntry.amount` is a rate on three
+of the five bases, so the ledger resolves it against the period's own volumes
+before it reaches the column, and shows what it resolved from underneath. The
+consequence is that a rate row's figure **moves when the period does** while a
+one-off fee's never does; the screen says so once at the top. See ADR-026, and
+`resolveEntryAmount`, which is the only place an entry becomes money and is
+checked to agree with `resolveCosts` per basis.
+
+**A per-event cost appears where it was paid**, in full, marked *Whole event* —
+and is still held out of that session's row on Finance. Both are right; ADR-025
+has the argument, and the check asserts both sides together so the disagreement
+is not mistaken for a defect.
+
+**An unpriced delivery shows `—` and is skipped by the running total**, which
+makes that column a floor rather than a figure. The count is reported so the
+screen can say so. This is invariant 2 at the last row it can be broken at.
+
+**The running balance is over the rows shown, not over the whole ledger.**
+Filtering to *stock bought* and reading a balance that still included every sale
+would be arithmetic the reader cannot check against what is in front of them, so
+`accumulate` runs it again over whatever survives the filter — and is the one
+place it is worked out either way.
+
+**No `now`.** Nothing on the ledger is a live figure: a session that is still
+trading sits at its last order, which is a fact rather than a reading of the
+clock. That is what keeps the whole table out of the clock tick (ADR-009).
+
+### Where it sits relative to Finance
+
+The nav period picker drives it, like every other table, and a Finance row
+drills through by setting the scope to that row's session or event and switching
+here. A **Show everything** toggle widens it to every row on record, because
+*where has the money gone* is sometimes a question about the year and stepping
+the period picker through twelve months is not an answer. Widened, the sales mix
+is recomputed over every order — a targeted per-unit cost spread over the wrong
+denominator is a wrong number, not a conservative one.
+
+It is closed entirely with the revenue PIN set (`locked: 'all'`). Unlike
+Inventory there is no quantity underneath to leave visible: every row on it is
+money.
+
+---
+
 ## The two order screens
 
 **All Orders (the Orders section) and History · Orders (inside Analytics) are

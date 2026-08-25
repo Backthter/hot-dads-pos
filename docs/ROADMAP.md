@@ -1,11 +1,11 @@
 # Where this is
 
-**Now:** Phase 1C-iii-b — History · Money, the money ledger
+**Now:** Phase 1C-iv — the Inventory and Business tables, and History · Stock
 **Default branch:** `master`
-**Checks:** 402 in `metrics.check.ts`, all passing — verified at the end of
-1C-iii-a. `pnpm typecheck` is clean. **This repository uses pnpm**; `npm i`
+**Checks:** 493 in `metrics.check.ts`, all passing — verified at the end of
+1C-iii-b. `pnpm typecheck` is clean. **This repository uses pnpm**; `npm i`
 writes a `package-lock.json` and flattens the layout.
-**Next ADR:** 025 — `02-DECISIONS.md` ends at ADR-024
+**Next ADR:** 027 — `02-DECISIONS.md` ends at ADR-026
 
 This page is an index of plans, not a plan. One line per phase. If it takes ten
 minutes to read, it has stopped doing its job.
@@ -25,12 +25,12 @@ Updated by every phase, as part of that phase's work.
 | **1C-ii-a** | Events carry a plan and a derived status; sessions can join and leave an existing event; an event of one is legitimate when a person declares it; events are never auto-deleted; the Sessions & Events manager | 020–021 |
 | **1C-ii-b** | Both pickers show what an event contains; the cost form names its target in words and offers to make an event of a lone session; `per-unit` costs target items or a category; `resolveCosts` returns a blended rate beside a per-item one | 022–023 |
 | **1C-iii-a** | The Finance table, one row per session with the event that totals them; `breakEvenCrossing` — the ticket that paid for the day, measured per ticket so it cannot move; the table primitive 1C-iv reuses | 024 |
+| **1C-iii-b** | History · Money — receipts, cost entries and sales in one column; a cash ledger shows a per-event cost where it was paid while Finance holds it back; one row per cost entry with the amount always resolved to rupees; the query language and its builder stop being about orders | 025–026 |
 
 ## Next
 
 | | | |
 |---|---|---|
-| **1C-iii-b** | Money | History · Money — the money ledger, unioning receipts, cost entries by basis, and sales rolled up per session |
 | **1C-iv** | Things | the Inventory and Business tables; History · Stock |
 | **1E** | Forecasting | session pace curves and within-day projection; prep forecasting from demand quantiles |
 | **2** | Inventory and units | continuous unit entry; portions (grams per patty); Drain → Delete; the unassigned-recipe badge |
