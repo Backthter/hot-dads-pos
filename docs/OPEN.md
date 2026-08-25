@@ -291,6 +291,32 @@ expensive order.
 
 ---
 
+## Finance computes its per-session figures twice
+
+**Found:** 1C-iii-a · **Take it:** 1C-iv, with the tab's layout
+**Where:** `src/app/analytics/tabs/FinanceTab.tsx` — the *Sessions in scope*
+panel, fed by `sessionPerformance`, sitting under the table fed by
+`financeRows`.
+
+**What happens if it is not fixed:** both walk the same orders and both produce
+a per-session `Totals`. Today they cannot disagree — each calls `totalsFor` over
+`ordersForSession` — but the screen now shows a session's takings and ticket
+count twice, from two computations, and that is the exact shape of the defect
+ADR-014 was written about: two functions answering one question until the day
+one of them is edited.
+
+**Why it was deferred:** the panel is not wrong and its one distinctive figure —
+revenue per trading hour — is not in the table. Folding it in means adding a
+column and deleting a panel, which is a decision about the tab's layout, and
+1C-iii-a was briefed to add a table rather than to rearrange what was already
+there.
+
+**Urgent when:** either figure is edited, or a third caller wants per-session
+totals. Whoever adds the revenue-per-hour column should delete the panel in the
+same change.
+
+---
+
 ## Actual food cost fell for periods containing positive corrections
 
 **Found:** 1A · **Take it:** nothing to take — recorded so it is not mistaken

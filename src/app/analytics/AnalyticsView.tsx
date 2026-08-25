@@ -374,7 +374,11 @@ export function AnalyticsView(props: AnalyticsViewProps) {
         ? groups.find(g => g.grouped && g.id === scoped.id) ?? null
         : null);
     return financeRows({
-      sessions: scopedSessions,
+      // Newest first. A Finance table is read as "how did the last one go"
+      // before it is read as "which paid best", and sorting by takings out of
+      // the gate loses the sequence a market actually ran in. Every column is
+      // still sortable; this is only where it starts.
+      sessions: [...scopedSessions].sort((a, b) => b.startedAt - a.startedAt),
       event: event ? { id: event.id, name: event.name, sessions: event.sessions } : null,
       orders: scopedOrders,
       costs: scopedEntries,

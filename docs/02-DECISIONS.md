@@ -1260,3 +1260,83 @@ certainly owed by this session is the worst available answer.
 at the price of a sentence explaining the one case where the pedantry shows.
 `metrics.check.ts` pins the arithmetic so that a later session tidying this
 fails a check rather than passing review.
+
+---
+
+## ADR-024 — The break-even crossing is measured per ticket, from rates rather than averages
+
+**Status:** accepted · 2026-08 · Depends on ADR-012, ADR-013, ADR-022
+
+**Context:** `breakEven` says *how much* a period has to take. The Finance table
+wanted the other half — *when it did* — which `PHASE-1.md` has called the most
+useful column on the screen since before Phase 1A.
+
+The obvious construction is to walk the period's orders accumulating net revenue
+and stop when it reaches `BreakEven.revenue`. It is one line, it reuses a figure
+that already exists, and it is wrong in a way that only shows up during service.
+
+`BreakEven.revenue` is `fixed ÷ contributionRatio`, and that ratio is built from
+the period's **averages** — `averagePrice`, `cogsRatio`, `averageBasket`. Every
+one of them moves as the day's mix changes. So both sides of the comparison move,
+and a crossing found at two o'clock can be *un-found* at four when a run of cheap
+sales drags the average price down and pushes the target up. A measurement that
+retracts is worse than no measurement: the shop saw it happen.
+
+**Decision:** The crossing is accumulated from **each ticket's own contribution**,
+computed from the cost *rates* and never from a period average:
+
+```
+netRevenue
+  − cogs                                    frozen at checkout (invariant 3)
+  − netRevenue × revenueRate                 per-revenue
+  − perOrderCost                             per-order, one ticket
+  − Σ lines: perUnitCostFor(item) × qty      per-unit, deals crediting components
+```
+
+The crossing is the first ticket at which the running total reaches
+`ResolvedCosts.fixed`.
+
+Every term is a property of that ticket and of the cost entries. The running
+total after ticket *N* is therefore a function of tickets 1..N alone, and
+ringing up ticket *N+1* cannot move a crossing that has already happened.
+
+**An uncosted ticket contributes nothing.** A line with no `unitCost` has no
+knowable margin. Reading the missing cost as zero would make that ticket's
+contribution its entire revenue and pull the crossing earlier — invariant 2's
+failure, in the flattering direction, on precisely the data nobody can check.
+Skipping the ticket errs the other way, so the reported crossing is never earlier
+than the truth and the column can say *"or earlier — 6% uncosted"*. `coverage` is
+returned for exactly that sentence.
+
+**Rejected:** *Cumulative revenue against `BreakEven.revenue`*, for the reason
+above. It is the ADR-012 defect in a new place: a figure that depends on when it
+is read.
+
+*Costing uncosted lines at the period's average ingredient ratio.* This gives a
+crossing for every period and reintroduces the same movement, with the added
+problem that the crossing would shift when an **unrelated** item's recipe was
+costed later.
+
+*Blocking unless coverage is complete.* Purest, and in practice hides the column
+from most real periods, since `costCoverage` is rarely 1. A floor that says it is
+a floor beats an em dash.
+
+*A crossing per item.* "The burger paid for itself at ticket 12" is a different
+question with a different denominator, and `breakEvenByItem` is where it belongs.
+
+**Consequences:** The crossing is a **measurement**, not a target and not a
+projection, and convention 5 governs it in the strong form — it may not move at
+all as the period fills up. Three checks assert exactly that.
+
+It *does* move when the shop **logs a cost afterwards**, and that is correct: the
+day genuinely cost more than was recorded, so it was paid for later than was
+thought. That is the only thing that may move it, and it is worth saying out loud
+because it is the one case a reader will mistake for the defect above.
+
+`BREAK_EVEN_BLOCKED` gains `notYet`, which `breakEven` has no use for. A target is
+always answerable; a measurement of something that has not happened yet is not,
+and *"Rs 4,300 to go"* is a better answer than an em dash for the live case.
+
+Voided orders are skipped (invariant 5), so voiding the ticket that caused the
+crossing hands it to the next one rather than leaving it pointing at a row that
+no longer counts.

@@ -528,6 +528,34 @@ lone session this scope is looking at when there is one, so the form can offer
 to make an event of it — the resolver decides, the form asks, and neither works
 the answer out twice.
 
+### The break-even crossing
+
+`breakEvenCrossing` · `src/app/analytics/metrics.ts`
+
+The ticket and the clock time a period covered its costs. Break-even revenue
+says *how much* has to be taken; this says *when it was*, and it is the question
+a shop actually asks at the end of a market.
+
+**It is a measurement, not a target and not a projection**, and that distinction
+is the whole of its design. Each ticket is charged its own frozen ingredient
+cost, its own share of takings, one per-order charge and its own per-unit costs
+— all from the cost **rates**, never from a period average. So the running total
+after ticket *N* depends on tickets 1..N and nothing else, and the afternoon
+cannot move a crossing that happened at lunchtime.
+
+Convention 5 governs it in its strong form: not merely "does not depend on how
+far through the period the reader is", but *does not move at all* as the period
+fills up. The one thing that moves it is the shop **logging a cost afterwards**,
+which is correct — the day cost more than was recorded, so it was paid for later
+than was thought. See ADR-024.
+
+A ticket with any uncosted line contributes **nothing** rather than counting at
+zero cost, so the crossing reported is never earlier than the truth. `coverage`
+says how much was left out, which is what lets the column say *"or earlier"*
+instead of presenting a floor as an exact answer.
+
+---
+
 ### The two pickers do not offer the same events
 
 This looks like an inconsistency and is not, so it is written down.

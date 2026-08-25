@@ -143,6 +143,12 @@ export function FinanceTable({
     },
   ], []);
 
+  /*
+   * No `defaultSort`. The rows arrive newest first, which is the order a market
+   * ran in and the order this is read in — a shop asks "how did Sunday go"
+   * before it asks "which paid best". Every column is still sortable; this is
+   * only where it starts.
+   */
   return (
     <Panel
       title="Did this pay?"
@@ -163,7 +169,6 @@ export function FinanceTable({
             )}
           </span>
         )}
-        defaultSort="net"
         moneyHidden={moneyHidden}
         onPickRow={onPickRow}
         isSummary={r => r.kind === 'event'}
