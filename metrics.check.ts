@@ -14,7 +14,7 @@ import { buildMovement, effectiveMovements, postMovements } from './src/app/lib/
 import {
   allEvents, costEntryIsCoherent, costsFiledAgainstEvent, costsForEvent, endSession, eventGroups,
   eventStatus, needsRefiling, pauseSession, resumeSession, sessionTradingHours, startSession,
-  ungroupedSessions,
+  targetAfterBasisChange, ungroupedSessions,
 } from './src/app/lib/sessions';
 import {
   COST_ENTRY_COLUMNS, costEntryFromRow, costEntryToRow,
@@ -822,6 +822,35 @@ check('dates with an event allow it', datedWith.perEvent.available, true);
 // make ADR-013's held-cost distinction meaningless, because the "event" and the
 // session would then be the same period.
 check('a session id never becomes an event id', loneScope.eventId === lone.id, false);
+
+/* --------------------------------- the target that survives a basis change */
+// This rule lived as one statement inside an onClick, on a .map over the five
+// bases, checked by nothing — added in 1A-ii (4fd29c2) and re-reported four
+// phases later as though it were still broken, because nothing said otherwise.
+// 1C-ii-b rewrote that whole control. Extracted first, then checked, so that a
+// later rewrite that drops it fails here rather than shipping.
+console.log('\nThe target that survives a basis change');
+
+// The case that was actually broken: a session picked under another basis is
+// not one of per-event's options, so leaving it selected shows a control whose
+// value is not in its own list — and produces an entry the form then refuses.
+check('per-event drops a session target', targetAfterBasisChange('per-event', 'session:s1'), '');
+check('per-event keeps an event target', targetAfterBasisChange('per-event', 'event:e1'), 'event:e1');
+check('per-event leaves empty empty', targetAfterBasisChange('per-event', ''), '');
+
+// Every other basis keeps whatever was chosen. An event target is legitimate
+// under all five — a cost logged against an event is still that event's,
+// whatever it is charged per — so nothing is cleared on the way back out.
+for (const basis of ['per-session', 'per-order', 'per-unit', 'per-revenue'] as CostBasis[]) {
+  check(`${basis} keeps a session target`, targetAfterBasisChange(basis, 'session:s1'), 'session:s1');
+  check(`${basis} keeps an event target`, targetAfterBasisChange(basis, 'event:e1'), 'event:e1');
+}
+
+// Switching away from per-event and back must not resurrect what was dropped.
+check(
+  'per-event → per-session → per-event stays empty',
+  targetAfterBasisChange('per-event', targetAfterBasisChange('per-session', targetAfterBasisChange('per-event', 'session:s1'))),
+  '');
 
 /* --------------------------------------------- events, and what they are for */
 // Phase 1C-ii-a. `per-event` existed for one cost — the pitch fee for a

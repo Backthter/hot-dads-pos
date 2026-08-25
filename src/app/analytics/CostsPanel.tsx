@@ -6,6 +6,7 @@ import { Button, Select, TextInput, alpha } from '../ui';
 import { costSummary } from './metrics';
 import {
   COST_BASIS_LABEL, COST_BASIS_UNIT, describeCostAmount, needsRefiling,
+  targetAfterBasisChange,
 } from '../lib/sessions';
 import type { PerEventAvailability } from './scope';
 import type { CostBasis, CostEntry, TradingEvent, TradingSession } from '../types';
@@ -235,8 +236,10 @@ export function CostsPanel({
                       setError('');
                       // The session that was picked is not on offer under
                       // per-event, and leaving it selected would show a control
-                      // whose value is not one of its options.
-                      if (b === 'per-event' && !target.startsWith('event:')) setTarget('');
+                      // whose value is not one of its options. The rule is a
+                      // pure function so that a rewrite of this control cannot
+                      // drop it silently; it is checked in metrics.check.ts.
+                      setTarget(targetAfterBasisChange(b, target));
                     }}
                     data-cost-basis={b}
                     data-cost-basis-disabled={disabled ? '' : undefined}

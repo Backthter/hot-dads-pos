@@ -459,6 +459,32 @@ export const COST_BASIS_LABEL: Record<CostBasis, string> = {
   'per-revenue': 'Share of sales',
 };
 
+/**
+ * The target that survives a basis change. Empty when the old one cannot.
+ *
+ * The cost form holds its target as one string — `session:<id>` or
+ * `event:<id>` — and the options it offers depend on the basis. Only events are
+ * offered under `per-event`, because a `per-event` cost can attach to nothing
+ * else (ADR-012), so a session target picked under another basis has to be
+ * cleared when the basis changes rather than left selected: a control showing a
+ * value that is not one of its own options is a control the shop cannot trust,
+ * and the entry it produces is refused after the fact.
+ *
+ * This is a pure function rather than a line in an `onClick` because it was one
+ * — added in 1A-ii (`4fd29c2`), one statement inside a handler on a `.map` over
+ * the bases, checked by nothing. Any rewrite of that control that did not
+ * happen to carry the line across would have dropped the rule silently. Now
+ * deleting it fails a check.
+ *
+ * Every other basis keeps whatever was chosen: an event target is legitimate
+ * under all five, since a cost logged against an event is still that event's
+ * whatever it is charged per.
+ */
+export function targetAfterBasisChange(basis: CostBasis, target: string): string {
+  if (basis !== 'per-event') return target;
+  return target.startsWith('event:') ? target : '';
+}
+
 /** `Rs 1,200 for this session`, `18 % of sales`. Amount and unit, never apart. */
 export function describeCostAmount(entry: Pick<CostEntry, 'amount' | 'basis'>): string {
   const { prefix, suffix } = COST_BASIS_UNIT[entry.basis];
