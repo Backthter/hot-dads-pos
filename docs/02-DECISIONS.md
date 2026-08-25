@@ -1124,3 +1124,139 @@ what it cannot do is be reported on, because there is nothing to report.
 `eventGroups` and `allEvents` answer different questions and a later phase must
 not merge them. `metrics.check.ts` asserts both halves — that no group is ever
 empty, and that `allEvents` keeps what `eventGroups` drops.
+
+---
+
+## ADR-022 — `per-unit` costs may target items or a category, and `resolveCosts` returns a blend beside a per-item rate
+
+**Status:** accepted · 2026-08
+
+**Context:** A `per-unit` cost is charged on every item sold. Most real ones are
+not: a burger box is a burger cost, a portion cup is a chips cost, a lid is a
+drink cost. Logging *"packaging, Rs 12 per item"* charged it against drinks too,
+which understates drink margin and overstates burger margin in the same breath —
+and does it in the two columns 1C-iv is about to build a table on.
+
+The error is not small on a stall whose menu spans a Rs 350 burger and a Rs 50
+bottle of water. Rs 12 is 3% of one and 24% of the other, so the item most
+likely to be dropped from the menu is the one carrying a cost it never incurred.
+
+**Decision:** `CostEntry.appliesTo?: { kind: 'items'; ids } | { kind: 'category';
+id }`. Absent means every item, which is what every row written before this
+phase means, so there is nothing to migrate.
+
+`resolveCosts` — still the single place a `CostSummary` plus a period's `Totals`
+becomes rupees — returns two things from one pass:
+
+- `perUnitCost`, a **blended** rate weighted by the period's sales mix, which is
+  what the headline `breakEven` divides by. A Rs 12 box on an item that is half
+  of what sold contributes Rs 6, because the headline is about the average sale
+  and the average sale is half a box.
+- `perUnitCostFor(menuItemId)`, the rate one item actually carries, which is
+  what `itemMargins` uses.
+
+A **category is stored by id** while `MenuItem.category` holds a name; the join
+happens in `salesMix` and nowhere else. Resolution is against the category the
+item is in **now** — moving an item into Burgers is the shop saying it now takes
+a box.
+
+**Rejected:** *Targeting `per-order`.* "Rs 4 per ticket that contains a burger"
+is a rule nobody wants to reason about, and it is ambiguous the moment a ticket
+contains two burgers and a drink — is it charged once, twice, or pro rata? Each
+answer is defensible and none is obvious, which is the signature of a feature
+that will be read wrongly.
+
+*Targeting `per-revenue`.* This looks like the same feature and is a different
+question. A delivery commission applies to **delivery orders**, not to burgers —
+it is a property of how the order arrived, not of what was in it. Building it as
+item targeting would put the right number on screen for the wrong reason and
+then be in the way when the real thing is wanted: the `channel` field on orders
+is where that belongs, in V2's foodpanda work.
+
+*Storing the category by name*, which would match how `MenuItem.category` reads
+and would break silently. Renaming a category rewrites every item's category
+(`useMenu.renameCategory`) and would not rewrite the cost, so the cost would
+stop matching anything and the items it paid for would get cheaper overnight,
+with nothing on screen to say why.
+
+*Two columns, a kind and an ids list.* Every row would carry a hole in the one
+it did not use — the shape ADR-012 rejected for the amount, for invariant 2's
+reason.
+
+*Treating an absent target as an empty one.* Absent means every item; empty
+means these items, of which there are none. Collapsing them makes every
+pre-existing row silently stop being charged, which is the flattering direction.
+
+**Consequences:** With nothing targeted, `perUnitCost` is arithmetically the old
+figure — by construction, not by agreement, because the untargeted total is
+computed first and the blend adds to it. A regression check pins `breakEven`
+both with a mix and without.
+
+**The blend looks like the circular rate ADR-012 removed, and is not.** That one
+divided a fixed rupee total by revenue-so-far, so it had no bound: a Rs 1,200
+cost was a 30% drag at Rs 4,000 of sales and 6% at Rs 20,000, and the target
+moved all day in the flattering direction. A blend of per-item rates never
+leaves the range of those rates whatever the day does, and it is the same kind
+of quantity as `averagePrice` and `averageBasket`, which `breakEven` has been a
+function of since 1A-ii. Convention 5 is not touched.
+
+A caller that passes no mix charges a targeted cost **in full**, to every item,
+rather than spreading it to nothing. That is the pessimistic reading and it is
+deliberate: spreading to zero would be the flattering answer produced
+automatically on data nobody looked at, which is invariant 2's failure one layer
+up. `workbook.ts` is such a caller today.
+
+Invariant 2 is unaffected. An item with a targeted cost and an incomplete recipe
+still has a `null` margin today — a cost you can resolve does not make an
+ingredient cost you cannot.
+
+---
+
+## ADR-023 — A per-event cost on a single-session event is held back like any other, and the difference is explained rather than removed
+
+**Status:** accepted · 2026-08 · Depends on ADR-013, ADR-020
+
+**Context:** ADR-013 holds a `per-event` cost back from a session's break-even
+and reports it on `heldEventCosts`, because apportioning it would make
+Saturday's target change on Monday. ADR-020 then made an event of one
+legitimate, so a shop can name a single-day market and file its pitch fee
+against the market rather than the day.
+
+Those two together produce a reading that looks wrong. From that session's
+scope, the pitch fee is held back and reported as the event's — but for an event
+of one the two scopes cover exactly the same trading. The session appears to
+pass break-even while a cost it genuinely owes sits outside the figure, and the
+panel offers to switch to "the whole event", which lands on the same trading with
+one more cost in it. 1C-ii-a recorded this and left it; it is the last thing
+1C-ii-b owed.
+
+**Decision:** The arithmetic does not change. Where the containing event has
+exactly one session, the panel says so:
+
+> **Winter Market · Rs 1,200 held** — this is the event's only session, so the
+> whole of it applies to this trading. [See the event]
+
+The reader gets the true picture in one sentence and the whole figure in one tap.
+
+**Rejected:** *Allocating the event's costs when `sessions.length === 1`.* This
+is the fix a later session will reach for, which is why this ADR exists. It
+sounds like a narrow special case and is not one: it makes break-even a function
+of how many sessions the event has **at the moment it is read**. Trade Saturday
+alone under a named market, read Saturday's break-even, then add Sunday to the
+same market on Sunday morning — and Saturday's target silently drops, because
+the cost that was charged to it in full is now shared. That is convention 5
+broken exactly as ADR-013 describes, arriving through the door ADR-013 left
+open.
+
+*Auto-ungrouping a single-session event*, or refusing to let one carry costs.
+Both undo ADR-020 to tidy a display problem, and ADR-018 already records why
+inventing and destroying events under the shop is the wrong direction.
+
+*Showing the held cost only when the event has two or more sessions.* The cost
+is real and outstanding either way. Hiding it in the one case where it is
+certainly owed by this session is the worst available answer.
+
+**Consequences:** A figure that behaves the same however many days a market ran,
+at the price of a sentence explaining the one case where the pedantry shows.
+`metrics.check.ts` pins the arithmetic so that a later session tidying this
+fails a check rather than passing review.
