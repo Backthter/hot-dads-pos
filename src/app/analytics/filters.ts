@@ -1,12 +1,24 @@
 import { orderMoney } from './metrics';
-import type { MenuItem, Order, TradingEvent, TradingSession } from '../types';
+import { COST_BASIS_LABEL } from '../lib/sessions';
+import type { MoneyRow } from './metrics';
+import type {
+  CostBasis, MenuItem, Order, StockItem, TradingEvent, TradingSession,
+} from '../types';
 
 /**
- * One filter language, used by both the dashboards and the Orders Explorer.
+ * One filter language, used by the dashboards, the Orders Explorer and the
+ * money ledger.
  *
  * Conditions are data, not code: they can be serialised into a saved search,
  * round-tripped through storage, and rendered as a sentence — none of which is
  * possible once a filter is a closure.
+ *
+ * **The row type is a parameter** (1C-iii-b). Everything that makes the
+ * language work — the operators, the comparison, the tree, the sentence —
+ * never knew what an order was; only the *field list* did. Making that explicit
+ * is what let History · Money have the same builder rather than a second, worse
+ * one written against a different set of dropdowns. Each screen supplies its
+ * own `FieldDef[]` and gets the rest.
  */
 
 export type Operator =
@@ -16,23 +28,24 @@ export type Operator =
 
 export type FieldKind = 'text' | 'number' | 'money' | 'date' | 'enum' | 'itemRef';
 
-export interface FieldDef {
+export interface FieldDef<Row> {
   id: string;
   label: string;
   group: string;
   kind: FieldKind;
   /** Options for enum fields. */
   options?: { value: string; label: string }[];
-  /** Pulls the comparable value out of an order. */
-  value: (order: Order, ctx: FilterContext) => unknown;
+  /**
+   * Pulls the comparable value out of a row.
+   *
+   * A field closes over whatever lookups it needs when the list is built, so
+   * there is no context argument threaded through the tree. There used to be
+   * one, and it existed only so `applyFilter` could rebuild the field list it
+   * had already been handed.
+   */
+  value: (row: Row) => unknown;
   /** Human sentence fragment, e.g. "total is more than". */
   describe?: string;
-}
-
-export interface FilterContext {
-  menuItems: MenuItem[];
-  sessions?: TradingSession[];
-  events?: TradingEvent[];
 }
 
 export interface Condition {
@@ -61,7 +74,7 @@ export function fieldsFor(
   menuItems: MenuItem[],
   sessions: TradingSession[] = [],
   events: TradingEvent[] = [],
-): FieldDef[] {
+): FieldDef<Order>[] {
   const categories = [...new Set(menuItems.map(m => m.category).filter(Boolean))];
   const sessionName = new Map(sessions.map(s => [s.id, s.name]));
   const eventOf = new Map(sessions.map(s => [s.id, s.eventId]));
@@ -136,8 +149,8 @@ export function fieldsFor(
       value: o => o.items.map(i => i.name) },
     { id: 'category', label: 'Contains category', group: 'Contents', kind: 'enum',
       options: categories.map(c => ({ value: c, label: c })),
-      value: (o, ctx) => o.items
-        .map(i => ctx.menuItems.find(m => m.id === i.menuItemId)?.category ?? '')
+      value: o => o.items
+        .map(i => menuItems.find(m => m.id === i.menuItemId)?.category ?? '')
         .filter(Boolean) },
     { id: 'units', label: 'Total units', group: 'Contents', kind: 'number',
       value: o => o.items.reduce((n, i) => n + i.quantity, 0) },
@@ -145,6 +158,82 @@ export function fieldsFor(
       value: o => o.items.length },
     { id: 'oversold', label: 'Sold beyond stock', group: 'Contents', kind: 'number',
       value: o => o.items.reduce((n, i) => n + (i.oversoldQuantity ?? 0), 0) },
+  ];
+}
+
+/**
+ * The same language, over the money ledger's rows.
+ *
+ * Deliberately a separate list rather than a superset of `fieldsFor`: a money
+ * row and an order have almost nothing in common, and a single list covering
+ * both would be mostly fields that are null on half the rows — which is the
+ * shape invariant 2 is about, arriving through a filter instead of a figure.
+ *
+ * Enums are matched on names, like the order fields, so a saved query reads as
+ * a sentence rather than as a row of ids.
+ */
+export function moneyFields(
+  sessions: TradingSession[] = [],
+  events: TradingEvent[] = [],
+  stockItems: StockItem[] = [],
+): FieldDef<MoneyRow>[] {
+  const sessionName = new Map(sessions.map(s => [s.id, s.name]));
+  const eventOf = new Map(sessions.map(s => [s.id, s.eventId]));
+  const eventName = new Map(events.map(e => [e.id, e.name]));
+  const stockName = new Map(stockItems.map(i => [i.id, i.name]));
+
+  const eventFor = (row: MoneyRow): string => {
+    // A cost filed against the event names it directly; a sales row or a
+    // session's own cost inherits it from the session it belongs to.
+    const id = row.eventId ?? (row.sessionId ? eventOf.get(row.sessionId) : undefined);
+    return id ? eventName.get(id) ?? '' : '';
+  };
+
+  return [
+    { id: 'kind', label: 'Kind', group: 'Row', kind: 'enum',
+      options: [
+        { value: 'purchase', label: 'Stock bought' },
+        { value: 'cost', label: 'Cost logged' },
+        { value: 'sales', label: 'Sales' },
+      ],
+      value: r => r.kind },
+    { id: 'description', label: 'Description', group: 'Row', kind: 'text',
+      value: r => r.label },
+    { id: 'basis', label: 'Charged', group: 'Row', kind: 'enum',
+      options: (Object.keys(COST_BASIS_LABEL) as CostBasis[])
+        .map(b => ({ value: COST_BASIS_LABEL[b], label: COST_BASIS_LABEL[b] })),
+      value: r => (r.basis ? COST_BASIS_LABEL[r.basis] : '') },
+    // Whether a figure is on file at all, which is the one thing about a row
+    // that a rupee comparison cannot express: `Out is less than 1` and `Out is
+    // not known` are different questions and only one of them has an operator.
+    { id: 'priced', label: 'Has an amount', group: 'Row', kind: 'enum',
+      options: [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }],
+      value: r => (r.moneyIn === null && r.moneyOut === null ? 'no' : 'yes') },
+
+    { id: 'out', label: 'Money out', group: 'Money', kind: 'money', value: r => r.moneyOut },
+    { id: 'in', label: 'Money in', group: 'Money', kind: 'money', value: r => r.moneyIn },
+    { id: 'running', label: 'Running total', group: 'Money', kind: 'money',
+      value: r => r.running },
+
+    { id: 'date', label: 'Date', group: 'Time', kind: 'date', value: r => r.at },
+    { id: 'hour', label: 'Hour of day', group: 'Time', kind: 'number',
+      value: r => new Date(r.at).getHours() },
+    { id: 'weekday', label: 'Weekday', group: 'Time', kind: 'enum',
+      options: WEEKDAYS.map(d => ({ value: d, label: d })),
+      value: r => WEEKDAYS[new Date(r.at).getDay()] },
+
+    { id: 'session', label: 'Session', group: 'Where', kind: 'enum',
+      options: sessions
+        .slice()
+        .sort((a, b) => b.startedAt - a.startedAt)
+        .map(s => ({ value: s.name, label: s.name })),
+      value: r => (r.sessionId ? sessionName.get(r.sessionId) ?? '' : '') },
+    { id: 'event', label: 'Event', group: 'Where', kind: 'enum',
+      options: events.map(e => ({ value: e.name, label: e.name })),
+      value: eventFor },
+    { id: 'item', label: 'Stock item', group: 'Where', kind: 'enum',
+      options: stockItems.map(i => ({ value: i.name, label: i.name })),
+      value: r => (r.stockItemId ? stockName.get(r.stockItemId) ?? '' : '') },
   ];
 }
 
@@ -198,48 +287,45 @@ function invert(operator: Operator): Operator {
   return operator;
 }
 
-export function matchesCondition(order: Order, condition: Condition, ctx: FilterContext): boolean {
-  const field = fieldsFor(ctx.menuItems, ctx.sessions, ctx.events)
-    .find(f => f.id === condition.field);
-  if (!field) return true;
-  return compare(field.value(order, ctx), condition);
-}
-
-/** Evaluates a nested group. An empty group matches everything. */
-export function matchesGroup(order: Order, group: Group, ctx: FilterContext): boolean {
+/** Evaluates a nested group against one row. An empty group matches everything. */
+export function matchesGroup<Row>(row: Row, group: Group, fields: FieldDef<Row>[]): boolean {
   if (group.children.length === 0) return true;
-  const results = group.children.map(child =>
-    isGroup(child) ? matchesGroup(order, child, ctx) : matchesCondition(order, child, ctx));
+  const results = group.children.map(child => {
+    if (isGroup(child)) return matchesGroup(row, child, fields);
+    const field = fields.find(f => f.id === child.field);
+    // An unknown field matches rather than excludes. A saved search written
+    // against a field that has since been renamed should return too much and
+    // be obvious, not return nothing and look like an empty day.
+    if (!field) return true;
+    return compare(field.value(row), child);
+  });
   return group.combinator === 'and' ? results.every(Boolean) : results.some(Boolean);
 }
 
 /**
- * Applies a filter tree. Fields are resolved once rather than per order — with
- * a few hundred orders it hardly matters, but rebuilding the field list inside
- * the loop is the kind of thing that quietly becomes the bottleneck later.
+ * Applies a filter tree. Fields are indexed once rather than per row — with a
+ * few hundred rows it hardly matters, but looking a field up inside the loop is
+ * the kind of thing that quietly becomes the bottleneck later.
  */
-export function applyFilter(
-  orders: Order[],
+export function applyFilter<Row>(
+  rows: Row[],
   group: Group,
-  menuItems: MenuItem[],
-  sessions: TradingSession[] = [],
-  events: TradingEvent[] = [],
-): Order[] {
-  const fields = new Map(fieldsFor(menuItems, sessions, events).map(f => [f.id, f]));
-  const ctx: FilterContext = { menuItems, sessions, events };
+  fields: FieldDef<Row>[],
+): Row[] {
+  const byId = new Map(fields.map(f => [f.id, f]));
 
-  const evaluate = (order: Order, node: Condition | Group): boolean => {
+  const evaluate = (row: Row, node: Condition | Group): boolean => {
     if (isGroup(node)) {
       if (node.children.length === 0) return true;
-      const results = node.children.map(child => evaluate(order, child));
+      const results = node.children.map(child => evaluate(row, child));
       return node.combinator === 'and' ? results.every(Boolean) : results.some(Boolean);
     }
-    const field = fields.get(node.field);
+    const field = byId.get(node.field);
     if (!field) return true;
-    return compare(field.value(order, ctx), node);
+    return compare(field.value(row), node);
   };
 
-  return orders.filter(order => evaluate(order, group));
+  return rows.filter(row => evaluate(row, group));
 }
 
 /* -------------------------------------------------------------- describing */
@@ -268,13 +354,7 @@ export function operatorsFor(kind: FieldKind): Operator[] {
 }
 
 /** Renders a filter tree as a readable sentence, for saved searches. */
-export function describeGroup(
-  group: Group,
-  menuItems: MenuItem[],
-  sessions: TradingSession[] = [],
-  events: TradingEvent[] = [],
-): string {
-  const fields = fieldsFor(menuItems, sessions, events);
+export function describeGroup<Row>(group: Group, fields: FieldDef<Row>[]): string {
   const part = (node: Condition | Group): string => {
     if (isGroup(node)) {
       if (node.children.length === 0) return '';

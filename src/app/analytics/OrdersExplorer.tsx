@@ -69,7 +69,7 @@ export function OrdersExplorer({
     const searched = query.length === 0
       ? orders
       : orders.filter(o => matchesSearch(searchHaystack(o, categories, sessionNames), query));
-    const matched = applyFilter(searched, group, menuItems, sessions, events);
+    const matched = applyFilter(searched, group, fields);
     const sorted = [...matched];
     if (sort === 'newest') sorted.sort((a, b) => b.timestamp - a.timestamp);
     if (sort === 'oldest') sorted.sort((a, b) => a.timestamp - b.timestamp);
@@ -91,7 +91,10 @@ export function OrdersExplorer({
       });
     }
     return sorted;
-  }, [orders, group, menuItems, sessions, events, sort, query, categories, sessionNames, placement]);
+    // `fields` replaces menuItems/sessions/events here: it is the memo built
+    // from all three, and the filter now takes the built list rather than
+    // rebuilding it per call.
+  }, [orders, group, fields, menuItems, sessions, events, sort, query, categories, sessionNames, placement]);
 
   const totals = useMemo(() => totalsFor(results), [results]);
 
@@ -218,7 +221,7 @@ export function OrdersExplorer({
           <strong style={{ color: 'var(--app-text)' }}>{results.length}</strong> order
           {results.length === 1 ? '' : 's'}
           {query.length > 0 ? ` · matching ${describeSearch(query)}` : ''}
-          {group.children.length > 0 ? ` · ${describeGroup(group, menuItems, sessions, events)}` : ''}
+          {group.children.length > 0 ? ` · ${describeGroup(group, fields)}` : ''}
         </span>
         {!revenueLocked && (
           <span className="text-[var(--app-text-muted)] text-[13px]" data-explorer-total>
@@ -245,7 +248,7 @@ export function OrdersExplorer({
           ))}
           <button
             onClick={() => {
-              const described = [describeSearch(query), group.children.length > 0 ? describeGroup(group, menuItems, sessions, events) : '']
+              const described = [describeSearch(query), group.children.length > 0 ? describeGroup(group, fields) : '']
                 .filter(Boolean).join(' · ');
               const name = (described || 'Everything').slice(0, 48);
               setSaved(prev => [...prev, { id: newId('s'), name, group, text }]);
