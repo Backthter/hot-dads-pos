@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { motion } from 'motion/react';
 import { CalendarRange, ChevronDown, Layers, Tag } from 'lucide-react';
 import {
@@ -21,6 +21,22 @@ import type { TradingEvent, TradingSession } from '../types';
  * Events come first in the list and dates second, because that is the order
  * they are wanted in. Picking either replaces the other outright: two filters
  * that can disagree are worse than one that cannot.
+ *
+ * **The list is hierarchical, and `Scope` is not.** An event shows the sessions
+ * it contains, indented under it, because two parallel flat lists never said
+ * that Winter Market *is* Saturday, Sunday and Monday — which is what made
+ * "charged once for the whole event" read as a phrase rather than as a thing on
+ * screen. Selecting the header scopes to the event and selecting a child scopes
+ * to that session; `Scope` still has its three shapes and only one is ever in
+ * force. This is presentation, and the two-filters-that-disagree reasoning is
+ * untouched.
+ *
+ * **No money here.** This control renders in the nav slot, which is outside the
+ * revenue lock — the same hole the export menu sits in (`docs/OPEN.md`). Per
+ * session takings in this list would put revenue in front of a user with no
+ * PIN, so the rows carry dates and counts and nothing a lock would hide.
+ * ADR-019 keeps order counts unlocked; takings are Phase 6's to let out, if
+ * anyone ever should.
  */
 
 const PRESETS: { id: RangePreset; label: string }[] = [
@@ -49,8 +65,34 @@ export function ScopePicker({
     ? (resolved.scope.kind === 'event' || resolved.scope.kind === 'session' ? resolved.scope.id : '')
     : '';
 
+  /*
+   * Which events are showing their sessions.
+   *
+   * Held as the set of events that have been *collapsed*, so the default is
+   * open: the containment is the thing this list gained, and an event that has
+   * to be opened before it shows what it contains has not shown it. Local
+   * presentation state, deliberately not sticky — it is which way a disclosure
+   * happens to be pointing, not where the shop was.
+   */
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const expanded = (id: string) => !collapsed.has(id);
+  const toggle = (id: string) => setCollapsed(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
+
   const dayLabel = (ms: number) =>
     new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+
+  /** `14–16 Aug` for a market that ran three days, `14 Aug` for one that ran one. */
+  const spanLabel = (group: { startedAt: number; endedAt?: number }) => {
+    const start = dayLabel(group.startedAt);
+    if (group.endedAt === undefined) return start;
+    const end = dayLabel(group.endedAt);
+    return start === end ? start : `${start}–${end}`;
+  };
 
   return (
     <Popover
@@ -97,20 +139,84 @@ export function ScopePicker({
               </PopoverNote>
             )}
             {groups.slice(0, 12).map(group => {
-              const selected = activeId === group.id
-                || (!group.grouped && resolved.scope.kind === 'session' && resolved.scope.id === group.sessions[0]?.id);
+              /*
+               * A real event and a lone session are two different things that
+               * used to draw identically, and they scope to different things:
+               * picking the event gives `{ kind: 'event' }`, picking the
+               * session gives `{ kind: 'session' }`, and only the first can
+               * carry a per-event cost (ADR-018). `grouped` is the distinction,
+               * and an event of one is grouped — it is a market the shop named,
+               * which is what ADR-020 made legitimate.
+               */
+              if (!group.grouped) {
+                const session = group.sessions[0];
+                const selected = resolved.scope.kind === 'session' && resolved.scope.id === session.id;
+                return (
+                  <PopoverItem
+                    key={group.id}
+                    data-scope-group={group.id}
+                    data-scope-loose-session={session.id}
+                    selected={selected}
+                    icon={<Layers size={15} />}
+                    title={group.name}
+                    detail={`${dayLabel(group.startedAt)} · not in an event`}
+                    onClick={() => pick({ kind: 'session', id: session.id })}
+                  />
+                );
+              }
+
+              const open = expanded(group.id);
               return (
-                <PopoverItem
-                  key={group.id}
-                  data-scope-group={group.id}
-                  selected={selected}
-                  icon={group.grouped ? <Tag size={15} /> : <Layers size={15} />}
-                  title={group.name}
-                  detail={`${group.grouped ? `${group.sessions.length} sessions · ` : ''}${dayLabel(group.startedAt)}`}
-                  onClick={() => pick(group.grouped
-                    ? { kind: 'event', id: group.id }
-                    : { kind: 'session', id: group.sessions[0].id })}
-                />
+                <div key={group.id} className="flex flex-col">
+                  <PopoverItem
+                    data-scope-group={group.id}
+                    data-scope-event={group.id}
+                    selected={activeId === group.id}
+                    icon={<Tag size={15} />}
+                    title={group.name}
+                    detail={`${group.sessions.length} session${group.sessions.length === 1 ? '' : 's'} · ${spanLabel(group)}`}
+                    onClick={() => pick({ kind: 'event', id: group.id })}
+                    trailing={(
+                      /*
+                       * Expanding is not selecting. The header scopes to the
+                       * whole event and the chevron only opens it, so a shop
+                       * looking at what a market contained does not have to
+                       * change what the screen is showing to find out.
+                       */
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        aria-label={open ? `Collapse ${group.name}` : `Expand ${group.name}`}
+                        data-scope-expand={group.id}
+                        className="flex p-[3px] -m-[3px] rounded-[6px]"
+                        style={{ color: 'var(--app-text-muted)' }}
+                        onClick={e => { e.stopPropagation(); toggle(group.id); }}
+                        onKeyDown={e => {
+                          if (e.key !== 'Enter' && e.key !== ' ') return;
+                          e.preventDefault();
+                          e.stopPropagation();
+                          toggle(group.id);
+                        }}
+                      >
+                        <motion.span animate={{ rotate: open ? 0 : -90 }} className="flex">
+                          <ChevronDown size={15} />
+                        </motion.span>
+                      </span>
+                    )}
+                  />
+                  {open && group.sessions.map(session => (
+                    <div key={session.id} className="pl-[22px]">
+                      <PopoverItem
+                        data-scope-session={session.id}
+                        selected={resolved.scope.kind === 'session' && resolved.scope.id === session.id}
+                        icon={<Layers size={13} />}
+                        title={session.name}
+                        detail={dayLabel(session.startedAt)}
+                        onClick={() => pick({ kind: 'session', id: session.id })}
+                      />
+                    </div>
+                  ))}
+                </div>
               );
             })}
 
