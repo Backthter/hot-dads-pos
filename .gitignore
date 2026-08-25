@@ -10,3 +10,10 @@ hotdads.db
 cloudsync.dll
 cloudsync.so
 cloudsync.dylib
+
+# The demo database is generated, not authored. `pnpm demo:build` rebuilds it
+# byte-identically from demo/data.ts, so committing a binary would only give
+# the repo something to go stale.
+demo/*.db
+demo/*.db-wal
+demo/*.db-shm

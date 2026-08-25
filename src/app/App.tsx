@@ -31,6 +31,7 @@ import type { WipeScope } from './components/WipeDataPanel';
 import {
   loadAllData, saveAllData, clearAllData, clearTransactionalData,
 } from '../db/persistence';
+import type { PersistedData } from '../db/persistence';
 
 /**
  * Composition.
@@ -114,7 +115,10 @@ function AppInner({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     (async () => {
       try {
-        const saved = await loadAllData();
+        // `demoFallback` is a no-op unless this is a demo build, and even
+        // then only fires when the database had nothing — which in practice
+        // means the browser, where there is no SQLite to talk to at all.
+        const saved = (await loadAllData()) ?? (await demoFallback());
         if (saved) {
           menu.actions.hydrate({
             menuItems: saved.menuItems,
@@ -362,6 +366,31 @@ function AppInner({ onLogout }: { onLogout: () => void }) {
       />
     </TicketMenuProvider>
   );
+}
+
+/**
+ * The demo dataset, when this is a demo build and nothing else can supply one.
+ *
+ * Reached only when the database had nothing to give: a `tauri dev` demo build
+ * finds `hotdads-demo.db` and never gets here, so anything changed while poking
+ * around survives a reload. The browser has no SQLite at all and always does.
+ *
+ * Dynamically imported and guarded by a build-time constant, so a production
+ * bundle contains no part of it — `demo/data.ts` is six weeks of generated
+ * trading and has no business being shipped to a till.
+ */
+async function demoFallback(): Promise<PersistedData | null> {
+  // Written against `import.meta.env` directly rather than against the
+  // `USING_DEMO_DB` constant beside it, and that is not a style choice: Vite
+  // replaces this expression with a literal at build time, so Rollup can fold
+  // the branch and drop the `import()` below with it. Testing an *imported*
+  // boolean leaves the import reachable as far as the bundler is concerned, and
+  // six weeks of invented trading is emitted as a lazy chunk that ships to a
+  // real till and is never loaded. Checked by grepping `dist/`.
+  if (import.meta.env.VITE_DEMO_DB !== '1') return null;
+  const { buildDemoSnapshot } = await import('../../demo/data');
+  console.info('[DEMO] no database available — generating the demo dataset in memory');
+  return buildDemoSnapshot();
 }
 
 export default function App() {
