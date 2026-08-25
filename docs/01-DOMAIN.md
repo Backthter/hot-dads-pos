@@ -277,6 +277,38 @@ every event figure and correct-looking on the form that created it. The load
 path demotes such a row to `per-session` instead of throwing, because a shop
 with one malformed row still has to be able to open its till.
 
+### What a `per-unit` cost is charged against
+
+`appliesTo` names the menu items a `per-unit` cost rides on — a list of item ids
+or a single category. **Absent means every item**, which is what every row
+written before Phase 1C-ii-b means, so there was nothing to migrate.
+
+It exists because most per-unit costs are not per-*every*-unit: a burger box is
+a burger cost, a portion cup is a chips cost, a lid is a drink cost. Charging
+one against everything understates the margin of whatever does not incur it and
+overstates the margin of whatever does. On a menu spanning a Rs 350 burger and a
+Rs 50 bottle of water, Rs 12 of packaging is 3% of one and 24% of the other.
+
+Three properties, each of which is a distinction something would otherwise
+collapse:
+
+- **`per-unit` only.** A cost charged once for a service, or per ticket, or as a
+  share of takings, has no item for the amount to be divided by. Asserted at the
+  write sites; dropped on load, like the per-event demotion above (ADR-022).
+- **A category is stored by id**, while `MenuItem.category` holds a *name*. The
+  join happens in `salesMix` and nowhere else. Storing the name would read more
+  naturally and break silently — renaming a category rewrites every item's
+  category and would not rewrite the cost.
+- **Absent is not empty.** Absent is every item; `{ kind: 'items', ids: [] }` is
+  these items, of which there are none. Everything unreadable — an older build's
+  row, malformed JSON, an unknown kind — reads as *absent*, never as a target of
+  nothing, because that is the reading which cannot silently shrink a figure.
+
+Resolution is against the category an item is in **now**, not the one it was in
+when the cost was logged. Moving an item into Burgers is the shop saying it now
+takes a box. Invariant 3 does not govern this — what invariant 3 freezes is
+`CartItem.unitCost`, a fact about a past transaction, which this never touches.
+
 ---
 
 ## Stock item
@@ -491,7 +523,35 @@ window as well; for a session scope that window is simply the session's own span
 `eventId` is the grouped event a scope resolves to, and is `undefined` for a
 lone session — which is *presented* as an event of one and is not one.
 `perEvent` says whether a `per-event` cost has anywhere to go from here, and
-what to tell the shop when it has not (ADR-018).
+what to tell the shop when it has not (ADR-018). It also carries `makeable`, the
+lone session this scope is looking at when there is one, so the form can offer
+to make an event of it — the resolver decides, the form asks, and neither works
+the answer out twice.
+
+### The two pickers do not offer the same events
+
+This looks like an inconsistency and is not, so it is written down.
+
+**`ScopePicker` excludes a session-less event. The cost target picker includes
+it.** They are built from the two functions above: `ScopePicker` runs
+`eventGroups`, which drops an event with no sessions; the cost form runs
+`allEvents`, which keeps it.
+
+The reason is that they answer different questions. `ScopePicker` asks *what can
+I look at* — and there is nothing to report on a market that has not traded, so
+offering it would scope the screen to an empty period. The cost form asks *what
+can I file this against* — and a market that has not traded yet is the single
+most important answer it has, because the pitch fee is paid on Saturday morning
+for a market that starts on Sunday. That case is the whole reason Phase 1C-ii-a
+existed (ADR-021).
+
+Both pickers are hierarchical as of 1C-ii-b, and an event shows the sessions it
+contains in each. What differs is only which events appear at all.
+
+One consequence worth knowing: `ScopePicker` shows **no money**. It renders in
+the nav slot, which is outside the revenue lock — the same gap the export menu
+sits in — so per-session takings there would hand every figure the lock hides to
+a user with no PIN. Dates and counts only, until Phase 6 closes that gap.
 
 ---
 
