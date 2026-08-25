@@ -48,9 +48,19 @@ src-tauri/src/
   sync.rs               the SCSP client and the table replication
   print.rs              raw printing
 docs/                   this directory
+demo/                   a generated six-week dataset; see demo/README.md
 metrics.check.ts        hand-computed checks for the analytics
 smoke.check.mjs         a scripted run through the till, for refactors
 ```
+
+**`demo/` is how a change gets looked at.** `pnpm demo:build && pnpm dev:demo`
+gives six weeks of a burger stall with the awkward cases in it — a three-day
+market with a held pitch fee, a break-even genuinely in doubt for most of a
+service, a delivery nobody priced, a fortnight taken before costing existed. It
+opens **`hotdads-demo.db`**, never `hotdads.db`; that choice is made in
+`src/db/database.ts` and nowhere else, and the seed script refuses to write the
+real name. The demo is absent from a production bundle, which is checked by
+grepping `dist/`.
 
 ---
 
